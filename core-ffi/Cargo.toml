@@ -1,0 +1,10 @@
+[package]
+name = "beam-core-ffi"
+description = "UniFFI bindings exposing beam-core to Kotlin (Android)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+beam-core.workspace = true

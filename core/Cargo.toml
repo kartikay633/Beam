@@ -1,0 +1,9 @@
+[package]
+name = "beam-core"
+description = "Beam protocol, crypto, transfer engine, resume and discovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
