@@ -10,3 +10,9 @@ repository = "https://github.com/kartikay633/Beam"
 
 [workspace.dependencies]
 beam-core = { path = "core" }
+
+# Optimize dependencies (blake3, tokio, ...) even in debug and test builds, so
+# tests that move hundreds of MB finish in seconds. Our own crates stay quick
+# to compile.
+[profile.dev.package."*"]
+opt-level = 3

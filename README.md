@@ -20,9 +20,26 @@ sharing that works even with no shared Wi-Fi network and no internet.
 
 ## Building
 
-Requires stable Rust (installed via [rustup](https://rustup.rs)).
+Requires stable Rust (installed via [rustup](https://rustup.rs)). On Windows,
+also install the Visual Studio C++ Build Tools.
 
 ```bash
 cargo test --workspace
-cargo run -p beam-cli
 ```
+
+## Trying it (phase 1: plain TCP, no encryption yet)
+
+In one terminal, start a receiver. It accepts every transfer automatically:
+
+```bash
+cargo run --release -p beam-cli -- receive --port 9000 --dir ./inbox
+```
+
+In another terminal, send files to it:
+
+```bash
+cargo run --release -p beam-cli -- send --to 127.0.0.1:9000 photo.jpg notes.txt
+```
+
+To send between two machines, use the receiver's LAN IP address. The wire
+format is described in [docs/PROTOCOL.md](docs/PROTOCOL.md).
