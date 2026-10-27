@@ -3,6 +3,7 @@
 
 pub mod bitmap;
 pub mod connection;
+pub mod discovery;
 pub mod frame;
 pub mod identity;
 pub mod messages;
@@ -12,10 +13,12 @@ pub mod secure;
 pub mod sender;
 pub mod transfer;
 pub mod trust;
+pub mod visibility;
 
 pub use connection::{
     Connection, ConnectionError, FrameReader, FrameWriter, PlainCipher, RecordOpener, RecordSealer,
 };
+pub use discovery::{Advertiser, Browser, DiscoveryError, DiscoveryEvent, NearbyDevice};
 pub use frame::{Frame, FrameError};
 pub use identity::{Identity, IdentityError};
 pub use messages::{DeviceId, DeviceType, PROTOCOL_VERSION};
@@ -28,6 +31,7 @@ pub use secure::{secure_connection, HandshakeInfo, Role};
 pub use sender::{send_to, SendEvent, SendOptions, SendOutcome};
 pub use transfer::{LocalDevice, PeerInfo, Progress, TransferError, TransferSummary, CHUNK_SIZE};
 pub use trust::{TrustStore, TrustStoreError, TrustedDevice};
+pub use visibility::{Visibility, VisibilityMode};
 
 /// Version of this crate, used by front-ends to report what they are built on.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

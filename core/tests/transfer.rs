@@ -355,7 +355,10 @@ async fn declined_transfer_reports_the_reason_and_writes_nothing() {
     .await
     .unwrap();
     assert!(matches!(sent, SendOutcome::Rejected { reason } if reason == "not now"));
-    assert!(matches!(receiver.next_outcome().await, Finished::Rejected));
+    assert!(matches!(
+        receiver.next_outcome().await,
+        Finished::Rejected(_)
+    ));
     assert!(!inbox.exists());
 }
 
@@ -474,7 +477,10 @@ async fn trusted_sender_without_auto_accept_is_still_asked() {
     .await
     .unwrap();
     assert!(matches!(sent, SendOutcome::Rejected { .. }));
-    assert!(matches!(receiver.next_outcome().await, Finished::Rejected));
+    assert!(matches!(
+        receiver.next_outcome().await,
+        Finished::Rejected(_)
+    ));
 }
 
 /// An attacker that copies a trusted device's name and id but has its own
@@ -600,7 +606,10 @@ async fn man_in_the_middle_is_detected_by_trust_and_verification_codes() {
     .unwrap();
     assert!(matches!(sent, SendOutcome::Rejected { .. }));
     mitm.await.unwrap();
-    assert!(matches!(receiver.next_outcome().await, Finished::Rejected));
+    assert!(matches!(
+        receiver.next_outcome().await,
+        Finished::Rejected(_)
+    ));
 
     let sender_view = sender_view.unwrap();
     assert_eq!(sender_view.name(), "laptop", "the MITM copied the name…");

@@ -155,6 +155,13 @@ pub enum TransferError {
     TrustStore(#[from] crate::trust::TrustStoreError),
     #[error("the receiver's key changed after reconnecting; refusing to resume")]
     PeerChanged,
+    #[error(
+        "expected to reach device {expected}, but {actual} answered (another device          may be announcing the same name); nothing was sent"
+    )]
+    UnexpectedPeer {
+        expected: DeviceId,
+        actual: DeviceId,
+    },
     #[error("chunk {chunk} of {file} failed verification {MAX_CHUNK_RETRIES} times")]
     TooManyRetries { file: String, chunk: u64 },
     #[error("could not reconnect within {seconds} s; last error: {last}")]

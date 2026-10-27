@@ -404,3 +404,79 @@ only for network-level failures (I/O error, closed connection, timeout).
 **Why:** It measures the shipped binary end to end, and Python is the quickest
 way to make charts. Loopback numbers measure the software (crypto, hashing,
 disk), not the network; LAN numbers need a second device.
+
+## 2026-10-27 — Trusted-only visibility over mDNS: an anonymous, rotating announcement
+
+**What:** In trusted-only mode the receiver still announces `_beam._tcp`, but
+the TXT record has no name and no id. It has only
+`rid = BLAKE3-keyed(derive_key(public key), 15-minute window)[0..8]`, and the
+instance and host names are built from `rid`. Devices that trust it compute
+the same `rid` from the public key in their trust store and show it by the
+name they gave it. Everyone else gets an anonymous entry that changes every
+15 minutes.
+
+**Why:** mDNS is multicast: every announcement reaches every device on the
+network, so "must not appear to unknown devices" can't be done by choosing who
+receives it. It can only be done by making the announcement meaningless to
+them. This is the stretch goal of SPEC.md 4.2 (rotating identifiers), applied
+to mDNS. On top of that, the receiver declines offers from untrusted devices
+in this mode, so knowing the port isn't enough.
+
+**Trade-off:** The tag is keyed by the *public* key. Any device that has ever
+learned it can recognize the announcement, including one that connected once
+without being trusted, since the handshake reveals the key. A tag per trusted
+peer, keyed by an X25519 shared secret, would close that gap. But it needs one
+tag per peer (TXT size limits) and a pairing step that doesn't exist yet
+(phase 5/6), so it stays a possible upgrade.
+
+**Alternatives:**
+- Not announcing at all in trusted-only mode: trusted devices couldn't find it
+  either, without a separate unicast mechanism.
+- Announcing normally and only refusing offers: that doesn't meet "must not
+  appear".
+
+## 2026-10-27 — mDNS results are hints; the sender pins the expected device id
+
+**What:**
+- `send --to <name or id>` resolves the device over mDNS, then sets
+  `SendOptions::expect_device`. If the handshake proves a different device
+  id, the sender stops before sending the OFFER (`UnexpectedPeer`).
+- A name matching several devices is an error that lists their ids.
+
+**Why:** Anyone on the network can announce "Kartikay's Laptop". Without this
+check, a spoofed announcement would at best get the user an unexpected
+verification code, and at worst a mistaken "yes" from someone hurrying.
+
+## 2026-10-27 — Announced addresses: loopback last; no host name broadcast
+
+**What:** The advertiser announces every interface address (mdns-sd's
+`enable_addr_auto`). Browsers order them: routable IPv4, routable IPv6,
+link-local IPv4, link-local IPv6, then loopback. The sender takes the first
+that accepts a TCP connection within 1.5 s (SPEC.md 5). Instance and host
+labels are `beam-<id>` or `beam-<rid>`.
+
+**Why:**
+- Found while testing: 127.0.0.1 sorted first. From another machine it would
+  reach the *sender's own* computer (possibly its own Beam receiver), and the
+  only thing stopping that was the id check.
+- The computer's host name is often personal ("Kartikays-Laptop") and would
+  defeat trusted-only anonymity, so it's never used.
+
+## 2026-10-27 — Visibility is enforced by the receiver, not just by mDNS
+
+**What:** `ReceiverConfig.visibility` is checked for every OFFER, before
+anyone is asked.
+
+- **Off** declines everything, including resumes.
+- **Trusted-only** declines untrusted senders without asking, but lets an
+  already-accepted transfer resume (for example when "everyone" expires in
+  the middle of a long transfer).
+- **Everyone** falls back to trusted-only after 10 minutes, as on AirDrop.
+
+`Visibility` is a shared handle that can change at runtime (a tray menu in
+phase 5). The advertiser follows its changes, its expiry and the rotation
+windows.
+
+**Why:** SPEC.md 6.4 says "Decline everything when visibility is Off, even if a
+connection reaches the port". Discovery only hides a device; it can't stop a
+sender that already knows the address.

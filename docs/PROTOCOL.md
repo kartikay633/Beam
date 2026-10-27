@@ -1,8 +1,9 @@
 # Beam wire protocol
 
-Status: **version 1.0, phase 3.** This covers encrypted transfers over one
-control connection plus parallel data connections, with resume. Discovery
-(mDNS, BLE) comes in later phases.
+Status: **version 1.0, phase 4.** This covers encrypted transfers over one
+control connection plus parallel data connections, with resume, and
+discovery on the local network with mDNS. BLE discovery comes in a later
+phase.
 
 All integers on the wire are **big-endian**. "MB" means 1,000,000 bytes;
 "MiB" means 1,048,576 bytes.
@@ -538,7 +539,78 @@ version 1.0.
 
 ## Discovery (mDNS)
 
-To be written in phase 4.
+Receivers announce themselves on the local network with multicast DNS /
+DNS-SD (RFC 6762, RFC 6763) as service type **`_beam._tcp.local.`**. The SRV
+record carries the receiver's TCP port. The A/AAAA records carry all of its
+addresses, including loopback and link-local ones, so senders should prefer
+routable IPv4, then IPv6, then link-local, and try loopback last.
+
+What is announced depends on the receiver's **visibility**:
+
+| Visibility | Announced | TXT record |
+|---|---|---|
+| everyone | yes | `v`, `vis=everyone`, `id`, `name`, `type` |
+| trusted only | yes, anonymously | `v`, `vis=trusted`, `rid` |
+| off | nothing | — |
+
+TXT keys:
+
+| Key | Value |
+|---|---|
+| `v` | Protocol major version, `1`. Announcements with another value are ignored. |
+| `vis` | `everyone` or `trusted`. |
+| `id` | Device id: 16 lowercase hex digits (no dashes). |
+| `name` | Device name, at most 63 bytes of UTF-8. |
+| `type` | `phone` or `laptop`. |
+| `rid` | Rotating identifier: 16 lowercase hex digits (see below). |
+
+Example (everyone):
+
+```
+instance  beam-80b4eac682edd3d3._beam._tcp.local.
+host      beam-80b4eac682edd3d3.local.
+TXT       v=1 vis=everyone id=80b4eac682edd3d3 name=Laptop-A type=laptop
+```
+
+The instance and host labels are `beam-` followed by the `id` (or the `rid`),
+so the computer's own host name is never broadcast.
+
+### Rotating identifier (trusted-only mode)
+
+```
+window = floor(unix_time / 900)                     (15-minute windows)
+k      = BLAKE3-derive_key(context = "beam 2026-10-27 rotating id v1",
+                           material = static public key (32 bytes))
+rid    = BLAKE3-keyed_hash(key = k, input = window as u64 little-endian)[0..8]
+```
+
+A device that trusts the announcer knows its public key, so it can compute
+`rid` for the current window and the windows on either side (tolerating
+±15 minutes of clock difference) and recognize it. It then shows it under the
+name from its own trust store. Anyone else sees an anonymous service whose
+name and `rid` change every 15 minutes, so they can't identify or track the
+device. The announcer re-registers at every window boundary.
+
+### Discovery is a hint, not proof
+
+Anyone on the network can announce any name or id. A sender that picks a
+device found over mDNS must check, after the Noise handshake, that the
+receiver's proven device id equals the `id` it chose (or, for a trusted-only
+device, the trusted key). If it doesn't, the sender closes the connection
+without sending an OFFER.
+
+### Visibility on the receiver
+
+Visibility is also enforced when an OFFER arrives, whatever the mDNS
+announcement says:
+
+- **Off:** every offer is declined: REJECT with reason
+  `not accepting transfers right now`.
+- **Trusted only:** offers from devices not in the trust store are declined
+  without asking the user (`only accepting transfers from trusted devices`).
+  A resumed transfer that was already accepted may continue.
+- **Everyone:** offers go to the user as usual. This mode falls back to
+  trusted-only **10 minutes** after it was chosen.
 
 ## Discovery (BLE advertisement and GATT)
 

@@ -27,6 +27,7 @@ use crate::transfer::{
     TransferError, TransferSummary, ACK_INTERVAL, CHECKPOINT_INTERVAL, CHUNK_SIZE,
     MAX_CHUNK_RETRIES, MAX_FILES_PER_OFFER, MAX_RAW_NAME_BYTES, PING_INTERVAL,
 };
+use crate::visibility::VisibilityMode;
 
 /// How the background check of a finished file came out.
 enum Finished {
@@ -113,6 +114,26 @@ async fn receive(
         stale.discard(&dir);
     }
 
+    // Visibility comes first: nobody is asked about an offer the current
+    // mode doesn't allow. A resumed transfer was already accepted, so it may
+    // continue in trusted-only mode (for example after "everyone" expired
+    // mid-transfer), but not once visibility is off.
+    let refusal = match shared.config.visibility.mode() {
+        VisibilityMode::Off => Some("not accepting transfers right now"),
+        VisibilityMode::TrustedOnly if !peer.is_trusted() && !resumable => {
+            Some("only accepting transfers from trusted devices")
+        }
+        _ => None,
+    };
+    if let Some(reason) = refusal {
+        conn.send(&reject(reason.to_string())).await?;
+        let _ = conn.shutdown().await;
+        return Ok(ReceiveOutcome::Rejected {
+            from: peer,
+            reason: reason.to_string(),
+        });
+    }
+
     let auto_accepted = !resumable && peer.trusted.as_ref().is_some_and(|t| t.auto_accept);
     let decision = if resumable || auto_accepted {
         Decision::Accept
@@ -134,9 +155,9 @@ async fn receive(
             .await
     };
     if let Decision::Reject(reason) = decision {
-        conn.send(&reject(reason)).await?;
+        conn.send(&reject(reason.clone())).await?;
         let _ = conn.shutdown().await;
-        return Ok(ReceiveOutcome::Rejected { from: peer });
+        return Ok(ReceiveOutcome::Rejected { from: peer, reason });
     }
 
     std::fs::create_dir_all(&dir).map_err(TransferError::local_file(&dir))?;

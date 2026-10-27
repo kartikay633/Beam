@@ -20,7 +20,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::connection::ConnectionError;
-use crate::messages::{FileEntry, Hash32};
+use crate::messages::{DeviceId, FileEntry, Hash32};
 use crate::transfer::{
     chunk_count, hash_file, LocalDevice, PeakMeter, PeerInfo, Progress, TransferError,
     TransferSummary,
@@ -35,6 +35,10 @@ pub struct SendOptions {
     pub streams: usize,
     /// How long to keep trying to reconnect after the connection drops.
     pub reconnect_window: Duration,
+    /// The device the sender means to reach (for example one found by name
+    /// over mDNS, which anyone can spoof). The handshake must prove this id,
+    /// or nothing is sent.
+    pub expect_device: Option<DeviceId>,
     /// Test hook: flip one byte in the first transmission of this
     /// `(file_id, chunk_index)` so the receiver's check fails once.
     #[doc(hidden)]
@@ -46,6 +50,7 @@ impl Default for SendOptions {
         SendOptions {
             streams: 4,
             reconnect_window: Duration::from_secs(60),
+            expect_device: None,
             corrupt_once: None,
         }
     }

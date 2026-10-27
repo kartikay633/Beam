@@ -27,7 +27,7 @@ also install the Visual Studio C++ Build Tools.
 cargo test --workspace
 ```
 
-## Trying it (phase 3: CLI only, same network)
+## Trying it (phase 4: CLI only, same network)
 
 Every connection is end-to-end encrypted with Noise XX. On first run each
 device creates a key pair in its config folder (`%APPDATA%\Beam` on Windows).
@@ -35,21 +35,35 @@ Files are sent over 4 parallel encrypted connections by default
 (`--streams N` to change it). If the connection drops, the sender reconnects
 for up to 60 s and resumes where it left off.
 
-In one terminal, start a receiver:
+On one computer, start a receiver. It announces itself on the local network
+(mDNS):
 
 ```bash
-cargo run --release -p beam-cli -- receive --port 9000 --dir ./inbox
+cargo run --release -p beam-cli -- --name "My Laptop" receive --dir ./inbox
 ```
 
-In another terminal, send files to it:
+On another computer on the same Wi-Fi, list nearby devices and send by name:
 
 ```bash
-cargo run --release -p beam-cli -- send --to 127.0.0.1:9000 photo.jpg notes.txt
+cargo run --release -p beam-cli -- discover --seconds 5
+cargo run --release -p beam-cli -- send --to "My Laptop" photo.jpg notes.txt
 ```
+
+`--to` also takes a device id (`80b4-eac6-82ed-d3d3`) or an address
+(`192.168.1.20:9000`). Windows Firewall asks once to let `beam-cli` use the
+network: allow it on private networks.
 
 Both terminals show the same 6-digit **verification code**. The receiver asks:
 `[y]es`, `[n]o`, or `[t]rust`. Trust remembers the sender's key and accepts
 its future transfers automatically.
+
+**Visibility** (`receive --visibility …`), like AirDrop:
+
+| Mode | Who sees it | Who can send |
+|---|---|---|
+| `everyone` (default) | Everyone nearby, for 10 minutes, then trusted only | Anyone; you're asked each time |
+| `trusted` | Only trusted devices (others see an anonymous, changing entry) | Trusted devices only |
+| `off` | Nobody | Nobody |
 
 To try two separate devices on one machine, give each its own identity with
 `--config-dir`:

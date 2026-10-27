@@ -13,7 +13,7 @@ use std::time::Duration;
 use beam_core::{
     BoxFuture, Decision, DeviceType, Identity, IncomingOffer, LocalDevice, Progress,
     ReceiveHandler, ReceiveOutcome, Receiver, ReceiverConfig, TransferError, TransferSummary,
-    TrustStore, TrustedDevice,
+    TrustStore, TrustedDevice, Visibility, VisibilityMode,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -89,7 +89,7 @@ pub enum Finished {
         files: Vec<std::path::PathBuf>,
         summary: TransferSummary,
     },
-    Rejected,
+    Rejected(String),
     Failed {
         error: String,
         retryable: bool,
@@ -131,7 +131,7 @@ impl ReceiveHandler for TestHandler {
                 files: files.iter().map(|f| f.path.clone()).collect(),
                 summary: *summary,
             },
-            Ok(ReceiveOutcome::Rejected { .. }) => Finished::Rejected,
+            Ok(ReceiveOutcome::Rejected { reason, .. }) => Finished::Rejected(reason.clone()),
             Err(e) => Finished::Failed {
                 error: e.to_string(),
                 retryable: e.is_retryable() || matches!(e, TransferError::Superseded),
@@ -162,12 +162,24 @@ impl TestReceiver {
         download_dir: &Path,
         decide: impl Fn(&IncomingOffer) -> Decision + Send + Sync + 'static,
     ) -> TestReceiver {
+        let visibility = Visibility::new(VisibilityMode::Everyone);
+        Self::start_with(me, trust, download_dir, visibility, decide).await
+    }
+
+    pub async fn start_with(
+        me: LocalDevice,
+        trust: TrustStore,
+        download_dir: &Path,
+        visibility: Visibility,
+        decide: impl Fn(&IncomingOffer) -> Decision + Send + Sync + 'static,
+    ) -> TestReceiver {
         let receiver = Receiver::bind(
             "127.0.0.1:0",
             ReceiverConfig {
                 device: me,
                 download_dir: download_dir.to_path_buf(),
                 trust,
+                visibility,
             },
         )
         .await

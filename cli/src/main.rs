@@ -8,10 +8,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use beam_core::discovery::{first_reachable, resolve};
 use beam_core::{
-    send_to, BoxFuture, Decision, DeviceId, DeviceType, Identity, IncomingOffer, LocalDevice,
-    PeerInfo, Progress, ReceiveHandler, ReceiveOutcome, Receiver, ReceiverConfig, SendEvent,
-    SendOptions, SendOutcome, TransferError, TransferSummary, TrustStore, TrustedDevice,
+    send_to, Advertiser, BoxFuture, Browser, Decision, DeviceId, DeviceType, DiscoveryEvent,
+    Identity, IncomingOffer, LocalDevice, NearbyDevice, PeerInfo, Progress, ReceiveHandler,
+    ReceiveOutcome, Receiver, ReceiverConfig, SendEvent, SendOptions, SendOutcome, TransferError,
+    TransferSummary, TrustStore, TrustedDevice, Visibility, VisibilityMode,
 };
 use clap::{Parser, Subcommand};
 use uuid::Uuid;
@@ -20,6 +22,8 @@ const IDENTITY_FILE: &str = "identity.json";
 const TRUST_FILE: &str = "trusted_devices.json";
 /// Files listed individually in the accept prompt before summarizing.
 const PROMPT_FILE_LIMIT: usize = 10;
+/// How long `send --to <name>` looks for the device on the network.
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Parser)]
 #[command(name = "beam-cli", version = version_line(), about = "Send and receive files with Beam")]
@@ -51,12 +55,23 @@ enum Command {
         /// Folder to save received files into.
         #[arg(long, default_value = "./inbox")]
         dir: PathBuf,
+        /// Who can see this device and send to it: everyone (for 10 minutes,
+        /// then trusted), trusted, or off.
+        #[arg(long, default_value = "everyone")]
+        visibility: VisibilityMode,
+    },
+    /// List Beam devices on the local network as they appear and disappear.
+    Discover {
+        /// Stop after this many seconds (default: run until Ctrl+C).
+        #[arg(long)]
+        seconds: Option<u64>,
     },
     /// Send files to a receiver.
     Send {
-        /// Receiver address, e.g. 127.0.0.1:9000.
+        /// Receiver: a device name or id found on the local network
+        /// (see `discover`), or an address such as 192.168.1.20:9000.
         #[arg(long)]
-        to: SocketAddr,
+        to: String,
         /// Parallel data connections.
         #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u16).range(1..=16))]
         streams: u16,
@@ -121,9 +136,18 @@ async fn main() -> Result<()> {
     let trust = TrustStore::open(&config_dir.join(TRUST_FILE))?;
 
     match cli.command {
-        Command::Receive { port, bind, dir } => {
+        Command::Receive {
+            port,
+            bind,
+            dir,
+            visibility,
+        } => {
             let device = local_device(&config_dir, cli.name)?;
-            receive(device, trust, SocketAddr::new(bind, port), dir).await
+            receive(device, trust, SocketAddr::new(bind, port), dir, visibility).await
+        }
+        Command::Discover { seconds } => {
+            let device = local_device(&config_dir, cli.name)?;
+            discover(device, trust, seconds.map(Duration::from_secs)).await
         }
         Command::Send {
             to,
@@ -212,15 +236,19 @@ async fn receive(
     trust: TrustStore,
     addr: SocketAddr,
     dir: PathBuf,
+    mode: VisibilityMode,
 ) -> Result<()> {
+    let visibility = Visibility::new(mode);
     let config = ReceiverConfig {
-        device,
+        device: device.clone(),
         download_dir: dir.clone(),
         trust: trust.clone(),
+        visibility: visibility.clone(),
     };
     let receiver = Receiver::bind(addr, config)
         .await
         .with_context(|| format!("could not listen on {addr}"))?;
+    let port = receiver.local_addr()?.port();
     let me = &receiver.config().device;
     println!(
         "Listening on {} as \"{}\" ({}), saving to {}",
@@ -229,6 +257,10 @@ async fn receive(
         me.device_id(),
         dir.display()
     );
+    let _advertiser = Advertiser::start(device, port, visibility.clone())
+        .context("could not announce this device on the local network")?;
+    println!("{}", describe_visibility(mode));
+    tokio::spawn(report_visibility_expiry(visibility));
     println!("Press Ctrl+C to stop.");
     receiver
         .run(CliHandler {
@@ -301,8 +333,8 @@ impl ReceiveHandler for CliHandler {
                     summary.streams
                 );
             }
-            Ok(ReceiveOutcome::Rejected { from }) => {
-                println!("Declined the transfer from \"{}\".", from.name());
+            Ok(ReceiveOutcome::Rejected { from, reason }) => {
+                println!("Declined the transfer from \"{}\" ({reason}).", from.name());
             }
             Err(err) if err.is_retryable() || matches!(err, TransferError::Superseded) => {
                 eprintln!("Transfer interrupted ({err}); kept the partial files for resuming.");
@@ -374,14 +406,119 @@ async fn ask_to_accept(offer: IncomingOffer, trust: TrustStore) -> Decision {
     }
 }
 
+fn describe_visibility(mode: VisibilityMode) -> &'static str {
+    match mode {
+        VisibilityMode::Everyone => {
+            "Visible to everyone nearby for 10 minutes, then to trusted devices only."
+        }
+        VisibilityMode::TrustedOnly => {
+            "Visible to trusted devices only; offers from other devices are declined."
+        }
+        VisibilityMode::Off => "Not visible, and declining every offer (--visibility off).",
+    }
+}
+
+/// Tells the user when "everyone" falls back to trusted-only.
+async fn report_visibility_expiry(visibility: Visibility) {
+    if let Some(until) = visibility.everyone_until() {
+        tokio::time::sleep_until(until).await;
+        if visibility.mode() == VisibilityMode::TrustedOnly {
+            println!("\n{}", describe_visibility(VisibilityMode::TrustedOnly));
+        }
+    }
+}
+
+/// Prints devices as they come and go, until `limit` (or forever).
+async fn discover(device: LocalDevice, trust: TrustStore, limit: Option<Duration>) -> Result<()> {
+    let mut browser = Browser::start(&device, trust)?;
+    println!("Looking for Beam devices on the local network… (Ctrl+C to stop)");
+    let deadline = limit.map(|d| tokio::time::Instant::now() + d);
+    // What was last printed for each device: mDNS re-announces a device as
+    // more of its addresses resolve, so only print real changes.
+    let mut seen: HashMap<DeviceId, (NearbyDevice, String)> = HashMap::new();
+    loop {
+        let next = match deadline {
+            Some(deadline) => match tokio::time::timeout_at(deadline, browser.next()).await {
+                Ok(event) => event,
+                Err(_) => break,
+            },
+            None => browser.next().await,
+        };
+        match next {
+            Some(DiscoveryEvent::Found(found)) => {
+                let line = describe_device(&found);
+                match seen.get(&found.device_id) {
+                    Some((_, printed)) if *printed == line => {}
+                    Some(_) => println!("~ {line}"),
+                    None => println!("+ {line}"),
+                }
+                seen.insert(found.device_id, (found, line));
+            }
+            Some(DiscoveryEvent::Lost(id)) => {
+                if let Some((lost, _)) = seen.remove(&id) {
+                    println!("- {} ({}) left", lost.name, lost.device_id);
+                }
+            }
+            None => break,
+        }
+    }
+    if seen.is_empty() {
+        println!("No devices found.");
+    }
+    Ok(())
+}
+
+fn describe_device(device: &NearbyDevice) -> String {
+    let kind = match device.device_type {
+        Some(DeviceType::Phone) => "phone",
+        Some(DeviceType::Laptop) => "laptop",
+        None => "device",
+    };
+    let trust = if device.trusted.is_some() {
+        "trusted"
+    } else {
+        "not trusted"
+    };
+    let address = device
+        .addresses
+        .first()
+        .map_or_else(|| "no address".to_string(), |a| a.to_string());
+    format!(
+        "{:<24} {:<7} {}  {:<22} {}",
+        device.name, kind, device.device_id, address, trust
+    )
+}
+
+/// Turns `--to` into an address. A device name or id is looked up with
+/// mDNS, and the transfer is then pinned to that device id.
+async fn find_receiver(
+    to: &str,
+    device: &LocalDevice,
+    trust: &TrustStore,
+    options: &mut SendOptions,
+) -> Result<SocketAddr> {
+    if let Ok(addr) = to.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+    eprintln!("Looking for \"{to}\" on the local network…");
+    let found = resolve(to, device, trust.clone(), RESOLVE_TIMEOUT).await?;
+    let addr = first_reachable(&found.addresses)
+        .await
+        .ok_or_else(|| beam_core::DiscoveryError::Unreachable(found.name.clone()))?;
+    eprintln!("Found \"{}\" ({}) at {addr}.", found.name, found.device_id);
+    options.expect_device = Some(found.device_id);
+    Ok(addr)
+}
+
 async fn send(
     device: LocalDevice,
     trust: TrustStore,
-    to: SocketAddr,
+    to: String,
     files: Vec<PathBuf>,
-    options: SendOptions,
+    mut options: SendOptions,
     json: bool,
 ) -> Result<()> {
+    let to = find_receiver(&to, &device, &trust, &mut options).await?;
     let mut printer = ProgressPrinter::new("Sending");
     let result = send_to(to, &device, &trust, &files, &options, |event| match event {
         SendEvent::Connected(peer) => {

@@ -67,6 +67,14 @@ pub(super) async fn run(
 ) -> Result<SessionEnd, TransferError> {
     let started = Instant::now();
     let (mut conn, peer, handshake) = open_control(connect(addr).await?, me, trust).await?;
+    if let Some(expected) = options.expect_device {
+        if peer.device_id() != expected {
+            return Err(TransferError::UnexpectedPeer {
+                expected,
+                actual: peer.device_id(),
+            });
+        }
+    }
     if history.pinned_key.is_some_and(|key| key != peer.public_key) {
         return Err(TransferError::PeerChanged);
     }

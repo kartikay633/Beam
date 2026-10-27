@@ -10,6 +10,8 @@
 
 mod manifest;
 mod session;
+
+pub(crate) use manifest::now_unix;
 mod stream;
 mod writer;
 
@@ -33,6 +35,7 @@ use crate::messages::{FileEntry, StreamOpen};
 use crate::secure::{secure_connection, HandshakeInfo, Role};
 use crate::transfer::{LocalDevice, PeerInfo, Progress, TransferError, TransferSummary};
 use crate::trust::TrustStore;
+use crate::visibility::Visibility;
 
 /// A new connection must say what it is within this long.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
@@ -44,6 +47,8 @@ pub struct ReceiverConfig {
     pub device: LocalDevice,
     pub download_dir: PathBuf,
     pub trust: TrustStore,
+    /// Who may send right now; checked for every offer.
+    pub visibility: Visibility,
 }
 
 /// What the user is asked to accept. File names are already sanitized.
@@ -81,6 +86,8 @@ pub enum ReceiveOutcome {
     },
     Rejected {
         from: PeerInfo,
+        /// The user's reason, or why the visibility mode refused the offer.
+        reason: String,
     },
 }
 
