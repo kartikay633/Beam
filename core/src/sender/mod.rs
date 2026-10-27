@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use tokio::net::ToSocketAddrs;
-use tokio::sync::Notify;
+use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -39,6 +39,9 @@ pub struct SendOptions {
     /// over mDNS, which anyone can spoof). The handshake must prove this id,
     /// or nothing is sent.
     pub expect_device: Option<DeviceId>,
+    /// Set to `true` to cancel the transfer: the receiver is told (CANCEL)
+    /// and `send_to` returns [`TransferError::CancelledByUser`].
+    pub cancel: Option<watch::Receiver<bool>>,
     /// Test hook: flip one byte in the first transmission of this
     /// `(file_id, chunk_index)` so the receiver's check fails once.
     #[doc(hidden)]
@@ -51,6 +54,7 @@ impl Default for SendOptions {
             streams: 4,
             reconnect_window: Duration::from_secs(60),
             expect_device: None,
+            cancel: None,
             corrupt_once: None,
         }
     }
@@ -282,10 +286,24 @@ pub async fn send_to(
                     attempt,
                     error: err.to_string(),
                 });
-                tokio::time::sleep(backoff(attempt)).await;
+                let mut cancel = options.cancel.clone();
+                tokio::select! {
+                    _ = tokio::time::sleep(backoff(attempt)) => {}
+                    _ = cancelled(&mut cancel) => return Err(TransferError::CancelledByUser),
+                }
             }
             Err(err) => return Err(err),
         }
+    }
+}
+
+/// Resolves once `cancel` is set to `true`; never, if there's no cancel handle.
+pub(crate) async fn cancelled(cancel: &mut Option<watch::Receiver<bool>>) {
+    match cancel {
+        Some(rx) => {
+            let _ = rx.wait_for(|cancelled| *cancelled).await;
+        }
+        None => std::future::pending().await,
     }
 }
 

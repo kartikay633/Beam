@@ -111,6 +111,26 @@ impl Identity {
         file.sync_all().map_err(io_err)
     }
 
+    /// The private and public key, for storing in a platform keystore
+    /// (DPAPI, Android Keystore). Treat the result as a secret.
+    pub fn export_secret(&self) -> [u8; 2 * KEY_LEN] {
+        let mut out = [0u8; 2 * KEY_LEN];
+        out[..KEY_LEN].copy_from_slice(&self.private_key);
+        out[KEY_LEN..].copy_from_slice(&self.public_key);
+        out
+    }
+
+    /// Rebuilds an identity from [`Identity::export_secret`] bytes.
+    pub fn import_secret(bytes: &[u8]) -> Option<Identity> {
+        if bytes.len() != 2 * KEY_LEN {
+            return None;
+        }
+        Some(Identity {
+            private_key: bytes[..KEY_LEN].try_into().ok()?,
+            public_key: bytes[KEY_LEN..].try_into().ok()?,
+        })
+    }
+
     pub fn public_key(&self) -> &[u8; KEY_LEN] {
         &self.public_key
     }
@@ -205,6 +225,15 @@ mod tests {
             Err(IdentityError::Corrupt { .. })
         ));
         assert_eq!(std::fs::read(&path).unwrap(), b"{not json");
+    }
+
+    #[test]
+    fn secret_export_round_trips() {
+        let identity = Identity::generate();
+        let copy = Identity::import_secret(&identity.export_secret()).unwrap();
+        assert_eq!(copy.public_key(), identity.public_key());
+        assert_eq!(copy.private_key(), identity.private_key());
+        assert!(Identity::import_secret(&[0; 10]).is_none());
     }
 
     #[test]

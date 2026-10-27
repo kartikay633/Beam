@@ -12,7 +12,9 @@ use tokio::task::JoinSet;
 use super::manifest::{part_path, Manifest, ManifestFile};
 use super::stream::{self, StreamContext, StreamEvent};
 use super::writer::{self, PartFile, WriteJob, WriterEvent};
-use super::{Decision, IncomingOffer, ReceiveHandler, ReceiveOutcome, SavedFile, Shared};
+use super::{
+    Decision, IncomingOffer, ReceiveHandler, ReceiveOutcome, SavedFile, Shared, StopReason,
+};
 use crate::bitmap::ChunkBitmap;
 use crate::connection::{Connection, ConnectionError};
 use crate::frame::Frame;
@@ -135,30 +137,30 @@ async fn receive(
     }
 
     let auto_accepted = !resumable && peer.trusted.as_ref().is_some_and(|t| t.auto_accept);
+    let incoming = IncomingOffer {
+        transfer_id,
+        from: peer.clone(),
+        files: offer
+            .files
+            .iter()
+            .map(|f| FileEntry {
+                name: sanitize_file_name(&f.name),
+                ..f.clone()
+            })
+            .collect(),
+        total_size: offer.total_size,
+    };
     let decision = if resumable || auto_accepted {
         Decision::Accept
     } else {
-        handler
-            .decide(IncomingOffer {
-                transfer_id,
-                from: peer.clone(),
-                files: offer
-                    .files
-                    .iter()
-                    .map(|f| FileEntry {
-                        name: sanitize_file_name(&f.name),
-                        ..f.clone()
-                    })
-                    .collect(),
-                total_size: offer.total_size,
-            })
-            .await
+        handler.decide(incoming.clone()).await
     };
     if let Decision::Reject(reason) = decision {
         conn.send(&reject(reason.clone())).await?;
         let _ = conn.shutdown().await;
         return Ok(ReceiveOutcome::Rejected { from: peer, reason });
     }
+    handler.accepted(&incoming, resumable);
 
     std::fs::create_dir_all(&dir).map_err(TransferError::local_file(&dir))?;
     let mut transfer = if resumable {
@@ -179,12 +181,7 @@ async fn receive(
     let started = Instant::now();
     let resumed_bytes = transfer.progress().bytes_done;
     let result = transfer
-        .run(
-            conn,
-            data_connections,
-            guard.cancel.clone(),
-            handler.as_ref(),
-        )
+        .run(conn, data_connections, guard.stop.clone(), handler.as_ref())
         .await;
 
     match result {
@@ -467,7 +464,7 @@ impl IncomingTransfer {
         &mut self,
         conn: Connection<TcpStream>,
         mut data_connections: mpsc::Receiver<Connection<TcpStream>>,
-        mut cancel: watch::Receiver<bool>,
+        mut stop: watch::Receiver<StopReason>,
         handler: &dyn ReceiveHandler,
     ) -> Result<(), TransferError> {
         let transfer_id = self.manifest.transfer_id;
@@ -609,11 +606,35 @@ impl IncomingTransfer {
                         ping_nonce += 1;
                         control.send(&Frame::Ping(Ping { nonce: ping_nonce })).await?;
                     }
-                    _ = cancel.changed() => return Err(TransferError::Superseded),
+                    _ = stop.changed() => {
+                        return Err(match *stop.borrow() {
+                            StopReason::Cancelled => TransferError::CancelledByUser,
+                            _ => TransferError::Superseded,
+                        });
+                    }
                 }
             }
         }
         .await;
+
+        // A transfer ending for good tells the sender *before* the data
+        // connections close; otherwise the sender would see them drop first,
+        // take it for a network problem, and reconnect.
+        if let Err(err) = &result {
+            if !err.is_retryable()
+                && !matches!(err, TransferError::Cancelled(_) | TransferError::Superseded)
+            {
+                let _ = control
+                    .send(&Frame::Cancel(Cancel {
+                        transfer_id,
+                        reason: match err {
+                            TransferError::CancelledByUser => "cancelled by the receiver".into(),
+                            other => other.to_string(),
+                        },
+                    }))
+                    .await;
+            }
+        }
 
         // Stop the streams, then let the writer finish and sync what it has.
         tasks.shutdown().await;
@@ -625,32 +646,18 @@ impl IncomingTransfer {
             }
         }
 
-        match &result {
-            Ok(()) => {
-                control
-                    .send(&Frame::TransferComplete(TransferComplete {
-                        transfer_id,
-                        stats: TransferStats {
-                            bytes: progress.bytes_total,
-                            files: self.files.len() as u32,
-                            duration_ms: run_started.elapsed().as_millis() as u64,
-                        },
-                    }))
-                    .await?;
-                let _ = control.shutdown().await;
-            }
-            Err(err)
-                if !err.is_retryable()
-                    && !matches!(err, TransferError::Cancelled(_) | TransferError::Superseded) =>
-            {
-                let _ = control
-                    .send(&Frame::Cancel(Cancel {
-                        transfer_id,
-                        reason: err.to_string(),
-                    }))
-                    .await;
-            }
-            Err(_) => {}
+        if result.is_ok() {
+            control
+                .send(&Frame::TransferComplete(TransferComplete {
+                    transfer_id,
+                    stats: TransferStats {
+                        bytes: progress.bytes_total,
+                        files: self.files.len() as u32,
+                        duration_ms: run_started.elapsed().as_millis() as u64,
+                    },
+                }))
+                .await?;
+            let _ = control.shutdown().await;
         }
         result
     }

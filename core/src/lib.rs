@@ -24,7 +24,7 @@ pub use identity::{Identity, IdentityError};
 pub use messages::{DeviceId, DeviceType, PROTOCOL_VERSION};
 pub use receiver::{
     BoxFuture, Decision, IncomingOffer, ReceiveHandler, ReceiveOutcome, Receiver, ReceiverConfig,
-    SavedFile,
+    ReceiverHandle, SavedFile,
 };
 pub use sanitize::sanitize_file_name;
 pub use secure::{secure_connection, HandshakeInfo, Role};

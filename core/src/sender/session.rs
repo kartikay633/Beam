@@ -18,7 +18,8 @@ use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 
 use super::{
-    ChunkQueue, ChunkRef, FullHashes, SendEvent, SendOptions, SessionHistory, TransferPlan,
+    cancelled, ChunkQueue, ChunkRef, FullHashes, SendEvent, SendOptions, SessionHistory,
+    TransferPlan,
 };
 use crate::bitmap::ChunkBitmap;
 use crate::connection::{ConnectionError, FrameWriter, DATA_PAYLOAD_LEN};
@@ -89,10 +90,19 @@ pub(super) async fn run(
         total_size: plan.total_size,
     }))
     .await?;
+    let mut cancel = options.cancel.clone();
     let accept = loop {
-        let frame = tokio::time::timeout(ACCEPT_TIMEOUT, conn.read_frame())
-            .await
-            .map_err(|_| ConnectionError::Timeout("receiver to accept"))??;
+        let frame = tokio::select! {
+            frame = tokio::time::timeout(ACCEPT_TIMEOUT, conn.read_frame()) => frame
+                .map_err(|_| ConnectionError::Timeout("receiver to accept"))??,
+            _ = cancelled(&mut cancel) => {
+                let _ = conn.send(&Frame::Cancel(Cancel {
+                    transfer_id: plan.transfer_id,
+                    reason: "cancelled by the sender".into(),
+                })).await;
+                return Err(TransferError::CancelledByUser);
+            }
+        };
         match frame {
             Frame::Accept(accept) if accept.transfer_id == plan.transfer_id => break accept,
             Frame::Reject(reject) if reject.transfer_id == plan.transfer_id => {
@@ -278,7 +288,18 @@ pub(super) async fn run(
                     history.peak.add(bytes);
                     on_event(SendEvent::Progress(progress));
                 }
-                StreamEvent::Failed(err) => return Err(err),
+                StreamEvent::Failed(err) => {
+                    // A data connection breaking may just be the receiver
+                    // closing after a CANCEL that is still on its way over
+                    // the control connection. Look for it before treating
+                    // this as a network problem (which would reconnect).
+                    if err.is_retryable() {
+                        if let Some(reason) = pending_cancel(&mut frames).await {
+                            return Err(TransferError::Cancelled(reason));
+                        }
+                    }
+                    return Err(err);
+                }
             },
             _ = hashes.ready.notified() => {
                 send_ready_file_dones(&mut control, plan, hashes, &mut waiting_for_hash, &mut done_sent).await?;
@@ -287,8 +308,29 @@ pub(super) async fn run(
                 ping_nonce += 1;
                 control.send(&Frame::Ping(Ping { nonce: ping_nonce })).await?;
             }
+            _ = cancelled(&mut cancel) => {
+                queue.close();
+                let _ = control.send(&Frame::Cancel(Cancel {
+                    transfer_id: plan.transfer_id,
+                    reason: "cancelled by the sender".into(),
+                })).await;
+                return Err(TransferError::CancelledByUser);
+            }
         }
     }
+}
+
+/// Waits briefly for a CANCEL on the control connection.
+async fn pending_cancel(
+    frames: &mut mpsc::Receiver<Result<Frame, TransferError>>,
+) -> Option<String> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
+    while let Ok(Some(Ok(frame))) = tokio::time::timeout_at(deadline, frames.recv()).await {
+        if let Frame::Cancel(cancel) = frame {
+            return Some(cancel.reason);
+        }
+    }
+    None
 }
 
 /// Sends FILE_DONE for every file that is fully acknowledged and whose

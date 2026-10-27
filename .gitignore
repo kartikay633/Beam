@@ -18,6 +18,7 @@ pnpm-debug.log*
 
 # ---- Tauri ----
 desktop/src-tauri/target/
+desktop/dist/
 desktop/src-tauri/gen/schemas/
 desktop/src-tauri/WixTools/
 
@@ -36,6 +37,9 @@ captures/
 *.keystore
 android/app/src/main/jniLibs/
 android/app/src/main/java/uniffi/
+
+# ---- Claude Code (local preview config) ----
+/.claude/
 
 # ---- IDEs and OS ----
 .idea/

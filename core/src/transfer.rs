@@ -171,6 +171,8 @@ pub enum TransferError {
     },
     #[error("a newer connection took over this transfer")]
     Superseded,
+    #[error("transfer cancelled")]
+    CancelledByUser,
     #[error("data connection rejected: {0}")]
     BadDataStream(String),
 }

@@ -1,6 +1,6 @@
 # Beam wire protocol
 
-Status: **version 1.0, phase 4.** This covers encrypted transfers over one
+Status: **version 1.0, phase 5.** This covers encrypted transfers over one
 control connection plus parallel data connections, with resume, and
 discovery on the local network with mDNS. BLE discovery comes in a later
 phase.
@@ -611,6 +611,32 @@ announcement says:
   A resumed transfer that was already accepted may continue.
 - **Everyone:** offers go to the user as usual. This mode falls back to
   trusted-only **10 minutes** after it was chosen.
+
+## Pairing QR code
+
+The desktop app shows a QR code (SPEC.md 6.3) that encodes one link:
+
+```
+beam://pair?v=1&id=<id>&key=<key>&name=<name>&addr=<addresses>
+```
+
+| Parameter | Value |
+|---|---|
+| `v` | Format version, `1`. |
+| `id` | Device id: 16 lowercase hex digits. |
+| `key` | Static public key: 64 lowercase hex digits. A scanner must check that `id` is the first 8 bytes of SHA-256(`key`). |
+| `name` | Device name, percent-encoded (RFC 3986 unreserved characters are left as they are). |
+| `addr` | Comma-separated `ip:port` (IPv6 as `[ip]:port`), percent-encoded. Non-loopback, non-link-local addresses only, IPv4 first. |
+
+Example:
+
+```
+beam://pair?v=1&id=e430a9931d4673e6&key=4fe40cb5…5c5d&name=KARTIKAY&addr=172.16.144.19%3A9000
+```
+
+Scanning gives the phone the computer's full public key, so it can trust it
+directly. The phone sending its own key back over an authenticated session,
+making the trust mutual, is defined in phase 6.
 
 ## Discovery (BLE advertisement and GATT)
 

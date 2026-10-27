@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["core", "core-ffi", "cli"]
+members = ["core", "core-ffi", "cli", "desktop/src-tauri"]
+# The desktop app needs WebView2 / GTK system libraries, so plain `cargo build`
+# and `cargo test` at the root skip it; build it with `npm run tauri` in desktop/.
+default-members = ["core", "core-ffi", "cli"]
 
 [workspace.package]
 version = "0.1.0"

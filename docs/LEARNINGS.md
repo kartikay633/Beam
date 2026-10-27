@@ -82,3 +82,23 @@ Bugs that took more than an hour to fix. For each one: symptom, root cause, fix.
   Now 1,000 files take about 1.3 s (≈1.3 ms per file, mostly file creation
   under on-access scanning).
 - **Phase:** 3
+
+## Cancelling on the receiver restarted the whole transfer
+
+- **Symptom:** The test `receiver_can_cancel_mid_transfer` cancelled an
+  incoming 300 MB transfer. The sender then reported **success**, with one
+  reconnect, and the receiver held a complete copy of the file.
+- **Root cause:** The receiver's teardown first shut down its tasks (closing
+  the data connections) and only then sent CANCEL on the control connection.
+  The sender saw the data connections break first, classified that as a
+  network drop (retryable), and reconnected before reading the CANCEL. By
+  then the receiver had deleted its progress file, so the reconnect looked
+  like a brand-new offer and was accepted again.
+- **Fix:**
+  - The receiver sends CANCEL *before* closing anything.
+  - On a broken data connection, the sender drains the control connection
+    for up to 500 ms looking for a CANCEL before deciding to reconnect.
+
+  Messages that end a session must always go out before the connections
+  close, because peers read different connections in no particular order.
+- **Phase:** 5

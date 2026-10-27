@@ -1,0 +1,33 @@
+[package]
+name = "beam-desktop"
+description = "Beam desktop app (Tauri)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "beam-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.7.4", features = [] }
+
+[dependencies]
+beam-core.workspace = true
+dirs = "7.0.0"
+hex = "0.4.3"
+if-addrs = "0.15.0"
+qrcode = "0.14.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tauri = { version = "2.12.5", features = ["tray-icon"] }
+tauri-plugin-autostart = "2.7.0"
+tauri-plugin-dialog = "2.8.3"
+tauri-plugin-opener = "2.7.2"
+tauri-plugin-single-instance = "2.5.4"
+tokio = { version = "1.54.1", features = ["rt", "sync", "time", "macros"] }
+uuid = "1.29.0"
+
+[target."cfg(windows)".dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Com", "Win32_UI_Shell", "Win32_System_Memory"] }

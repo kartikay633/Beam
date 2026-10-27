@@ -108,6 +108,41 @@ pub trait ReceiveHandler: Send + Sync + 'static {
     /// A connection was dropped before it became a transfer: a failed
     /// handshake, an impersonation attempt, a bad data stream.
     fn connection_refused(&self, _error: &TransferError) {}
+
+    /// An offer was accepted (by the user, automatically, or as a resume)
+    /// and data is about to flow. Useful for showing transfers that never
+    /// went through [`ReceiveHandler::decide`].
+    fn accepted(&self, _offer: &IncomingOffer, _resumed: bool) {}
+}
+
+/// Controls a running [`Receiver`] from elsewhere (a UI).
+#[derive(Clone)]
+pub struct ReceiverHandle {
+    shared: Arc<Shared>,
+}
+
+impl ReceiverHandle {
+    /// Cancels an incoming transfer: the sender is told and partial files
+    /// are deleted. Returns `false` if no such transfer is running.
+    pub fn cancel(&self, transfer_id: Uuid) -> bool {
+        match self.shared.lock_active().get(&transfer_id) {
+            Some(entry) => {
+                let _ = entry.stop.send(StopReason::Cancelled);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Why a running session is asked to stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopReason {
+    Running,
+    /// A reconnect of the same transfer took over.
+    Superseded,
+    /// The user cancelled it.
+    Cancelled,
 }
 
 /// A TCP listener that receives transfers.
@@ -135,6 +170,12 @@ impl Receiver {
 
     pub fn config(&self) -> &ReceiverConfig {
         &self.shared.config
+    }
+
+    pub fn handle(&self) -> ReceiverHandle {
+        ReceiverHandle {
+            shared: self.shared.clone(),
+        }
     }
 
     /// Serves connections until the task is dropped.
@@ -210,7 +251,7 @@ struct DataRoute {
 struct ActiveEntry {
     generation: u64,
     sender_key: [u8; 32],
-    cancel: watch::Sender<bool>,
+    stop: watch::Sender<StopReason>,
     finished: watch::Receiver<bool>,
 }
 
@@ -294,19 +335,19 @@ impl Shared {
                         ))
                     }
                     Some(entry) => {
-                        let _ = entry.cancel.send(true);
+                        let _ = entry.stop.send(StopReason::Superseded);
                         (entry.generation, entry.finished.clone())
                     }
                     None => {
                         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
-                        let (cancel_tx, cancel_rx) = watch::channel(false);
+                        let (stop_tx, stop_rx) = watch::channel(StopReason::Running);
                         let (finished_tx, finished_rx) = watch::channel(false);
                         active.insert(
                             transfer_id,
                             ActiveEntry {
                                 generation,
                                 sender_key,
-                                cancel: cancel_tx,
+                                stop: stop_tx,
                                 finished: finished_rx,
                             },
                         );
@@ -315,7 +356,7 @@ impl Shared {
                             transfer_id,
                             generation,
                             finished: finished_tx,
-                            cancel: cancel_rx,
+                            stop: stop_rx,
                         });
                     }
                 }
@@ -349,8 +390,8 @@ pub(crate) struct ActiveGuard {
     transfer_id: Uuid,
     generation: u64,
     finished: watch::Sender<bool>,
-    /// Becomes `true` when a newer session takes over.
-    pub cancel: watch::Receiver<bool>,
+    /// Changes when the session should stop (takeover or user cancel).
+    pub stop: watch::Receiver<StopReason>,
 }
 
 impl Drop for ActiveGuard {

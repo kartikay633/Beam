@@ -975,3 +975,102 @@ async fn sending_a_folder_fails_before_connecting() {
     .unwrap_err();
     assert!(err.to_string().contains("not a regular file"), "{err}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sender_can_cancel_mid_transfer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("big.bin");
+    write_random_file(&file, 300_000_000, 3);
+    let inbox = tmp.path().join("inbox");
+    let mut receiver = TestReceiver::start(
+        device("receiver"),
+        TrustStore::in_memory(),
+        &inbox,
+        accept_all,
+    )
+    .await;
+
+    let (cancel, cancel_rx) = tokio::sync::watch::channel(false);
+    let progress = receiver.progress.clone();
+    let canceller = tokio::spawn(async move {
+        while progress.load(std::sync::atomic::Ordering::Relaxed) < 20_000_000 {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        cancel.send(true).unwrap();
+    });
+    let err = send_to(
+        receiver.addr,
+        &device("sender"),
+        &TrustStore::in_memory(),
+        &[file],
+        &SendOptions {
+            cancel: Some(cancel_rx),
+            ..SendOptions::default()
+        },
+        |_| {},
+    )
+    .await
+    .unwrap_err();
+    canceller.await.unwrap();
+    assert!(
+        matches!(err, beam_core::TransferError::CancelledByUser),
+        "{err}"
+    );
+    assert!(matches!(
+        receiver.next_outcome().await,
+        Finished::Failed {
+            retryable: false,
+            ..
+        }
+    ));
+    assert!(
+        files_in(&inbox).is_empty(),
+        "partial files are removed: {:?}",
+        files_in(&inbox)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn receiver_can_cancel_mid_transfer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("big.bin");
+    write_random_file(&file, 300_000_000, 4);
+    let inbox = tmp.path().join("inbox");
+    let mut receiver = TestReceiver::start(
+        device("receiver"),
+        TrustStore::in_memory(),
+        &inbox,
+        accept_all,
+    )
+    .await;
+
+    let (handle, progress, accepted) = (
+        receiver.handle.clone(),
+        receiver.progress.clone(),
+        receiver.last_accepted.clone(),
+    );
+    let canceller = tokio::spawn(async move {
+        while progress.load(std::sync::atomic::Ordering::Relaxed) < 20_000_000 {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        let id = accepted.lock().unwrap().expect("the offer was accepted");
+        assert!(handle.cancel(id));
+    });
+    let err = send_to(
+        receiver.addr,
+        &device("sender"),
+        &TrustStore::in_memory(),
+        &[file],
+        &options(4),
+        |_| {},
+    )
+    .await
+    .unwrap_err();
+    canceller.await.unwrap();
+    assert!(
+        matches!(&err, beam_core::TransferError::Cancelled(reason) if reason.contains("cancelled")),
+        "{err}"
+    );
+    receiver.next_outcome().await;
+    assert!(files_in(&inbox).is_empty(), "{:?}", files_in(&inbox));
+}

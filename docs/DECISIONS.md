@@ -480,3 +480,115 @@ windows.
 **Why:** SPEC.md 6.4 says "Decline everything when visibility is Off, even if a
 connection reaches the port". Discovery only hides a device; it can't stop a
 sender that already knows the address.
+
+## 2026-10-27 — Desktop app layout and build
+
+**What:**
+- `desktop/` is the npm project (Vite root `desktop/ui`, output
+  `desktop/dist`), and `desktop/src-tauri` is a workspace member.
+- The workspace's `default-members` leave the desktop crate out, so
+  `cargo build` / `cargo test` at the root (and the Linux CI job) don't need
+  WebView or GTK libraries.
+- A separate Windows CI job builds the UI, runs clippy and the tests on the
+  desktop crate, and builds the MSI.
+
+**Why:** Tauri's CLI looks for `src-tauri` next to `package.json`, and
+SPEC.md asks for `desktop/src-tauri` and `desktop/ui`. Keeping the crate in
+the workspace shares `Cargo.lock` and the build cache with `beam-core`.
+
+## 2026-10-27 — The UI renders snapshots pushed by the backend
+
+**What:** The Rust side owns all state:
+- nearby devices, transfers, staged files, pending offers;
+- settings and trust (read from their stores).
+
+On any change it emits one `snapshot` event with everything. React just
+renders the latest snapshot; user actions are commands
+(`send_staged`, `cancel_transfer`, `respond_offer`, …). Progress-only updates
+are throttled to one snapshot every 150 ms.
+
+**Why:** There is one source of truth, so there's no state to keep in sync
+between Rust and JavaScript, and a reload or a new window (the offer popup)
+can't show something stale. Snapshots are a few kilobytes, so sending
+everything is cheaper than designing fine-grained events. The same shape will
+suit the Android UI's view model.
+
+**Alternatives:** Fine-grained events (device-found, progress, …) merged
+into React state: more code on both sides, and easy to drift.
+
+## 2026-10-27 — Incoming offers: a separate always-on-top window
+
+**What:** `ReceiveHandler::decide` opens a `WebviewWindow` labelled
+`offer-<id>` (always on top, focused, not resizable) that loads
+`#/offer/<id>`, and waits on a oneshot channel for the answer, for up to
+60 s. A timeout or a closed popup declines with "no answer". Ticking "trust
+this device" adds the sender to the trust store with auto-accept.
+
+**Why:** SPEC.md 9 asks for a small always-on-top popup. A separate window
+appears over whatever the user is doing even when the main window is hidden
+in the tray. The 60 s limit matches the sender's patience and stops a
+forgotten prompt from holding a session open.
+
+## 2026-10-27 — Device key encrypted with DPAPI
+
+**What:** On Windows the key pair is stored as `identity.dpapi`:
+`CryptProtectData` over the 64 bytes, with app-specific entropy
+(`"beam device identity v1"`) and `CRYPTPROTECT_UI_FORBIDDEN`. beam-core
+gained `Identity::export_secret` / `import_secret` so any platform keystore
+can hold the bytes.
+
+**Why:** DPAPI ties the secret to the Windows user account and machine, with
+no password to manage. The entropy means another app running as the same
+user can't simply ask DPAPI to decrypt our file without knowing it.
+
+**Alternatives:** Credential Manager (`CredWrite`): it's encrypted with DPAPI
+underneath anyway and limited to small blobs, and it adds a second API for no
+gain. A plain file (the CLI's approach): readable by any process running as
+the user.
+
+## 2026-10-27 — Explorer "Send to → Beam" via a shortcut and single-instance
+
+**What:**
+- On start-up (and when the setting is turned on) the app writes
+  `%APPDATA%\Microsoft\Windows\SendTo\Beam.lnk` with `IShellLinkW` /
+  `IPersistFile`, on its own thread with its own COM apartment.
+- `tauri-plugin-single-instance` forwards the command line of any second
+  launch to the running app, which stages those files and shows its window.
+
+**Why:** It's the standard way to appear in Send To, and needs no installer
+or registry entries. Rewriting the shortcut at start-up keeps it pointing at
+the current executable after an update or a move.
+
+## 2026-10-27 — Cancelling: CANCEL first, then close
+
+**What:**
+- **Sender:** `SendOptions::cancel` (a watch channel) can stop a send at any
+  point: while waiting for ACCEPT, mid-transfer, or between reconnects. The
+  sender sends CANCEL and returns `CancelledByUser`.
+- **Receiver:** a `ReceiverHandle` cancels a running incoming transfer, which
+  sends CANCEL **before** closing its data connections.
+- **Sender side of a broken data connection:** the sender first waits briefly
+  (500 ms) for a CANCEL on the control connection before treating it as a
+  network failure.
+
+**Why:** Found by a test (see LEARNINGS.md). If the data connections close
+first, the sender sees a network drop and reconnects, so the cancelled
+transfer starts again as a fresh offer.
+
+## 2026-10-27 — `ReceiveHandler::accepted` callback
+
+**What:** Called once an offer is accepted by any route: the user, a
+trusted device with auto-accept, or a resume.
+
+**Why:** Auto-accepted and resumed transfers never reach `decide`, but a UI
+still has to show them with their file names and sizes.
+
+## 2026-10-27 — Demo mode for UI work
+
+**What:** When the page isn't running inside Tauri (no
+`__TAURI_INTERNALS__`), `ui/src/api.ts` answers commands from built-in demo
+data.
+
+**Why:** Every screen, including the offer popup, can be designed and checked
+in an ordinary browser without building the Rust side. It's how the screens
+were reviewed before the first native run.

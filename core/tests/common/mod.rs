@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use beam_core::{
     BoxFuture, Decision, DeviceType, Identity, IncomingOffer, LocalDevice, Progress,
-    ReceiveHandler, ReceiveOutcome, Receiver, ReceiverConfig, TransferError, TransferSummary,
-    TrustStore, TrustedDevice, Visibility, VisibilityMode,
+    ReceiveHandler, ReceiveOutcome, Receiver, ReceiverConfig, ReceiverHandle, TransferError,
+    TransferSummary, TrustStore, TrustedDevice, Visibility, VisibilityMode,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -103,6 +103,7 @@ struct TestHandler {
     finished: mpsc::UnboundedSender<Finished>,
     refused: mpsc::UnboundedSender<String>,
     progress: Arc<AtomicU64>,
+    last_accepted: Arc<Mutex<Option<Uuid>>>,
 }
 
 impl ReceiveHandler for TestHandler {
@@ -114,6 +115,10 @@ impl ReceiveHandler for TestHandler {
     fn progress(&self, _: Uuid, progress: Progress) {
         self.progress
             .fetch_max(progress.bytes_done, Ordering::Relaxed);
+    }
+
+    fn accepted(&self, offer: &IncomingOffer, _resumed: bool) {
+        *self.last_accepted.lock().unwrap() = Some(offer.transfer_id);
     }
 
     fn finished(&self, _: Uuid, result: &Result<ReceiveOutcome, TransferError>) {
@@ -149,7 +154,10 @@ impl ReceiveHandler for TestHandler {
 /// connections.
 pub struct TestReceiver {
     pub addr: SocketAddr,
+    pub handle: ReceiverHandle,
     pub progress: Arc<AtomicU64>,
+    /// The transfer id of the most recently accepted offer.
+    pub last_accepted: Arc<Mutex<Option<Uuid>>>,
     finished: mpsc::UnboundedReceiver<Finished>,
     refused: mpsc::UnboundedReceiver<String>,
     task: JoinHandle<std::io::Result<()>>,
@@ -185,18 +193,23 @@ impl TestReceiver {
         .await
         .unwrap();
         let addr = receiver.local_addr().unwrap();
+        let handle = receiver.handle();
         let (finished_tx, finished) = mpsc::unbounded_channel();
         let (refused_tx, refused) = mpsc::unbounded_channel();
         let progress = Arc::new(AtomicU64::new(0));
+        let last_accepted = Arc::new(Mutex::new(None));
         let task = tokio::spawn(receiver.run(TestHandler {
             decide: Arc::new(decide),
             finished: finished_tx,
             refused: refused_tx,
             progress: progress.clone(),
+            last_accepted: last_accepted.clone(),
         }));
         TestReceiver {
             addr,
+            handle,
             progress,
+            last_accepted,
             finished,
             refused,
             task,

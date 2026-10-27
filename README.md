@@ -13,7 +13,7 @@ sharing that works even with no shared Wi-Fi network and no internet.
 | `core/` | `beam-core` (Rust): protocol, crypto, transfer engine, resume, mDNS |
 | `core-ffi/` | UniFFI wrapper exposing `beam-core` to Kotlin |
 | `cli/` | `beam-cli`: send / receive / discover from a terminal |
-| `desktop/` | Tauri v2 desktop app (later phase) |
+| `desktop/` | Windows desktop app (Tauri v2, React + TypeScript) |
 | `android/` | Android app, Kotlin + Jetpack Compose (later phase) |
 | `bench/` | Benchmark scripts, results and charts |
 | `docs/` | Spec, protocol, design decisions, learnings |
@@ -27,7 +27,20 @@ also install the Visual Studio C++ Build Tools.
 cargo test --workspace
 ```
 
-## Trying it (phase 4: CLI only, same network)
+## Desktop app (Windows)
+
+```bash
+cd desktop
+npm install
+npm run tauri dev
+```
+
+It sits in the tray, shows nearby devices, takes files by drag-and-drop or
+Explorer's **Send to → Beam**, and asks before accepting anything (an
+always-on-top popup with the verification code). It works with the CLI and
+with other copies of the app. See [desktop/README.md](desktop/README.md).
+
+## Trying it from the command line (same network)
 
 Every connection is end-to-end encrypted with Noise XX. On first run each
 device creates a key pair in its config folder (`%APPDATA%\Beam` on Windows).

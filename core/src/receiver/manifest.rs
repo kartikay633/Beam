@@ -75,7 +75,12 @@ impl Manifest {
         for file in self.files.iter().filter(|f| f.done_blake3.is_none()) {
             let _ = std::fs::remove_file(part_path(dir, &file.final_name));
         }
-        let _ = std::fs::remove_file(Self::path(dir, self.transfer_id));
+        let path = Self::path(dir, self.transfer_id);
+        let _ = std::fs::remove_file(&path);
+        // And the progress folder, if no other transfer is using it.
+        if let Some(partial_dir) = path.parent() {
+            let _ = std::fs::remove_dir(partial_dir);
+        }
     }
 }
 

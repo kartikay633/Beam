@@ -27,7 +27,7 @@ impl fmt::Display for ProtocolVersion {
 
 /// Short device identifier: the first 8 bytes of SHA-256(static public key)
 /// once identities exist (phase 2). Shown as 4 groups of 4 hex characters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DeviceId(#[serde(with = "serde_bytes")] pub [u8; 8]);
 
 impl fmt::Display for DeviceId {

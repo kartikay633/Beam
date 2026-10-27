@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The main window and incoming-offer popups.",
+  "windows": ["main", "offer-*"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "dialog:allow-open"
+  ]
+}
