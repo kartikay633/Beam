@@ -15,9 +15,12 @@ use uuid::Uuid;
 use crate::connection::{Connection, ConnectionError, RecordCipher, DATA_PAYLOAD_LEN};
 use crate::frame::Frame;
 use crate::messages::{ChunkHash, FileDone, FileEntry, Offer};
+use crate::secure::Role;
 use crate::transfer::{
-    chunk_count, chunk_end, exchange_hello, DeviceInfo, Progress, TransferError, TransferSummary,
+    chunk_count, chunk_end, establish_session, LocalDevice, PeerInfo, Progress, TransferError,
+    TransferSummary,
 };
+use crate::trust::TrustStore;
 
 const FILE_READ_BUFFER: usize = 1024 * 1024;
 
@@ -27,12 +30,22 @@ pub enum SendOutcome {
     Rejected { reason: String },
 }
 
+/// What the sender reports while it works.
+#[derive(Debug, Clone)]
+pub enum SendEvent {
+    /// The encrypted session is up and the receiver's identity is verified.
+    /// Show the verification code now, while the receiver decides.
+    Connected(PeerInfo),
+    Progress(Progress),
+}
+
 /// Checks the files, connects to `addr` over TCP and sends them.
 pub async fn send_to(
     addr: impl ToSocketAddrs,
-    me: &DeviceInfo,
+    me: &LocalDevice,
+    trust: &TrustStore,
     paths: &[PathBuf],
-    on_progress: impl FnMut(Progress),
+    on_event: impl FnMut(SendEvent),
 ) -> Result<SendOutcome, TransferError> {
     // Fail on a bad path before touching the network.
     let files = describe_files(paths).await?;
@@ -40,39 +53,42 @@ pub async fn send_to(
         .await
         .map_err(ConnectionError::from)?;
     stream.set_nodelay(true).map_err(ConnectionError::from)?;
-    run_sender(Connection::plain(stream), me, files, paths, on_progress).await
+    run_sender(stream, me, trust, files, paths, on_event).await
 }
 
-/// Runs the sender protocol over an established connection.
-pub async fn send_files<S, C>(
-    conn: Connection<S, C>,
-    me: &DeviceInfo,
+/// Runs the sender protocol (handshake included) over a connected stream.
+pub async fn send_files<S>(
+    stream: S,
+    me: &LocalDevice,
+    trust: &TrustStore,
     paths: &[PathBuf],
-    on_progress: impl FnMut(Progress),
+    on_event: impl FnMut(SendEvent),
 ) -> Result<SendOutcome, TransferError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
-    C: RecordCipher,
 {
     let files = describe_files(paths).await?;
-    run_sender(conn, me, files, paths, on_progress).await
+    run_sender(stream, me, trust, files, paths, on_event).await
 }
 
-async fn run_sender<S, C>(
-    mut conn: Connection<S, C>,
-    me: &DeviceInfo,
+async fn run_sender<S>(
+    stream: S,
+    me: &LocalDevice,
+    trust: &TrustStore,
     files: Vec<FileEntry>,
     paths: &[PathBuf],
-    mut on_progress: impl FnMut(Progress),
+    mut on_event: impl FnMut(SendEvent),
 ) -> Result<SendOutcome, TransferError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
-    C: RecordCipher,
 {
     let total_size = files.iter().map(|f| f.size).sum();
     let transfer_id = Uuid::new_v4();
 
-    exchange_hello(&mut conn, me, true).await?;
+    let (mut conn, peer) = establish_session(stream, me, trust, Role::Initiator).await?;
+    on_event(SendEvent::Connected(peer));
+    let mut on_progress = |p| on_event(SendEvent::Progress(p));
+
     conn.send(&Frame::Offer(Offer {
         transfer_id,
         files: files.clone(),

@@ -13,6 +13,6 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0.104"
 beam-core.workspace = true
-clap = { version = "4.6.7", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
+dirs = "7.0.0"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net"] }
-uuid = { version = "1.29.0", features = ["v4"] }

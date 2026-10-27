@@ -1,10 +1,10 @@
 # Beam wire protocol
 
-Status: **version 1.0, phase 1.** This covers a single plain-TCP connection.
-Encryption (Noise XX), parallel data connections, CHUNK_ACK, keepalive timing
-and resume are specified in SPEC.md and will be documented here as they are
-built. Message bodies for those are already defined below, so the encoding
-won't change.
+Status: **version 1.0, phase 2.** This covers a single TCP connection
+encrypted with Noise XX. Parallel data connections, CHUNK_ACK, keepalive
+timing and resume are specified in SPEC.md and will be documented here as
+they are built. Message bodies for those are already defined below, so the
+encoding won't change.
 
 All integers on the wire are **big-endian**. "MB" means 1,000,000 bytes.
 
@@ -15,6 +15,8 @@ A transfer runs over one TCP connection, which the sender opens:
 ```
 Sender                                   Receiver
 ──────                                   ────────
+Noise XX handshake (3 messages) ◄───────► both learn each other's static key
+── everything below is encrypted ──
 HELLO ──────────────────────────────────►
       ◄────────────────────────────────── HELLO
 OFFER ──────────────────────────────────►
@@ -31,18 +33,69 @@ close
 
 The sender does not wait between files, so many small files are pipelined.
 
+## Device identity
+
+Each device has a long-lived **static X25519 key pair**: its Noise static key.
+
+- **Device id:** the first 8 bytes of SHA-256(static public key).
+- **Fingerprint:** the device id written as 4 groups of 4 hex characters,
+  for example `346e-029e-3df3-3625`.
+- **Trusted devices:** a trusted device is remembered by its full 32-byte
+  public key, not by its name or id alone.
+
 ## Transport and encryption
 
 The TCP byte stream is a sequence of **records**:
 
 ```
-record = len:u16 | payload[len]
+record = len:u16 | payload[len]      (len ≤ 65,535)
 ```
 
-A record is the unit that will become one Noise transport message in phase 2,
-so `len` is at most 65,535. Phase 1 sends the payload in plaintext. To keep
-sizes identical once encryption is added, record plaintext is limited to
-**65,519 bytes** (65,535 minus a 16-byte AEAD tag).
+### Handshake
+
+The connection starts with a Noise handshake:
+
+| Parameter | Value |
+|---|---|
+| Pattern | `Noise_XX_25519_ChaChaPoly_BLAKE2s` |
+| Prologue | the 6 ASCII bytes `beam/1` |
+| Initiator | the side that opened the TCP connection |
+| Payloads | empty in all three messages |
+
+Each of the three XX messages (`→ e`, `← e, ee, s, es`, `→ s, se`) is sent as
+one record. A side that doesn't finish the handshake within **10 seconds** is
+disconnected.
+
+### Encrypted records
+
+After the handshake, every record payload is **one Noise transport message**
+(ChaCha20-Poly1305, 16-byte tag), so record plaintext is at most
+**65,519 bytes**. A record that fails authentication ends the connection.
+
+### Peer verification
+
+After the HELLO exchange (below), each side checks the other before going on:
+
+1. **Id matches key:** `HELLO.device_id` must equal the id derived from the
+   static key the handshake proved. A peer can't claim another device's id.
+2. **Trusted key matches:** if that id is in the local trust store, the proven
+   key must equal the stored key byte for byte.
+
+If either check fails, the connection is closed without further messages.
+
+### Verification code
+
+Both sides show a 6-digit code so users can spot a man-in-the-middle:
+
+```
+key  = BLAKE3-derive_key(context = "beam 2026-10-27 verification code v1",
+                         material = Noise handshake hash (32 bytes))
+code = little_endian_u64(key[0..8]) mod 1,000,000, written as 6 digits with leading zeros
+```
+
+A man-in-the-middle has to run two separate handshakes, so the two screens
+show different codes. Unknown devices are never accepted automatically. A
+trusted device with `auto_accept` skips the prompt.
 
 ## Framing
 
@@ -74,13 +127,15 @@ frame         = type:u8 | body
 
 Wire example: `PING {nonce: 1}` is the frame
 `0C A1 65 6E 6F 6E 63 65 01` (type 0x0C, map(1), text(5) "nonce", 1).
-On the wire, with the frame length and record length:
+With its frame length, the record plaintext is 13 bytes:
 
 ```
-00 0D            record len = 13
-00 00 00 09      frame_len  = 9
+00 00 00 09      frame_len = 9
 0C A1 65 6E 6F 6E 63 65 01
 ```
+
+Encrypted, that becomes a 29-byte Noise message (13 bytes + 16-byte tag), so
+the record on the wire is `00 1D` followed by 29 bytes of ciphertext.
 
 ## Messages
 
@@ -96,7 +151,7 @@ report a mismatch.
 | Field | Type | Meaning |
 |---|---|---|
 | `version` | map `{major: uint, minor: uint}` | Protocol version. Currently 1.0. |
-| `device_id` | bytes(8) | Device id (phase 1: random per run; phase 2: first 8 bytes of SHA-256 of the static key). |
+| `device_id` | bytes(8) | First 8 bytes of SHA-256 of the sender's static key. Must match the key proven in the handshake. |
 | `name` | text | Human-readable device name. |
 | `type` | text | `"phone"` or `"laptop"`. |
 | `capabilities` | array of text | Optional features. Empty in phase 1. |
@@ -108,7 +163,8 @@ report a mismatch.
 ```
 
 If the major versions differ, both sides close the connection and show an
-error such as "peer speaks protocol 2.0, but this device speaks 1.0".
+error such as "peer speaks protocol 2.0, but this device speaks 1.0". Then
+each side runs the [peer verification](#peer-verification) checks.
 
 ### 0x02 OFFER (sender → receiver)
 
@@ -187,7 +243,7 @@ Defined now, used from phase 3.
 | Field | Type | Meaning |
 |---|---|---|
 | `transfer_id` | uuid | The transfer this data connection belongs to. |
-| `session_token` | bytes(32) | Derived from the control connection's Noise handshake hash. |
+| `session_token` | bytes(32) | Derived from the control connection's Noise handshake hash (exact derivation defined in phase 3). |
 | `stream_index` | uint (u16) | 0-based index of this data connection. |
 
 ```

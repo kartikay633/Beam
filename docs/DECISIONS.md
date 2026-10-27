@@ -112,3 +112,111 @@ checked case-insensitively on every platform.
   are optimized even in debug and test builds, so the 200 MB integration test
   finishes in about a second instead of minutes. Our own crates still compile
   quickly.
+
+## 2026-10-27 — Noise XX instead of TLS with self-signed certificates
+
+**What:** Every connection starts with a `Noise_XX_25519_ChaChaPoly_BLAKE2s`
+handshake through the `snow` crate. Each record after it is one Noise
+transport message.
+
+**Why:**
+- **No certificate infrastructure.** Beam devices identify each other by a raw
+  public key (pinned through QR pairing or the verification code). TLS is
+  built around certificates and CA chains. With self-signed certificates we
+  would have to turn off chain validation and write custom pinning callbacks,
+  which is exactly where TLS setups usually go wrong.
+- **Mutual authentication is built in.** In XX, both sides send their static
+  key, encrypted, and prove they own it. With TLS, client certificates are an
+  optional extra that many libraries handle awkwardly.
+- **Small and auditable.** One fixed cipher suite, no negotiation, and no
+  version or extension zoo, so there's nothing to downgrade. `snow` is a
+  focused implementation of a published spec. We don't invent any crypto
+  ourselves.
+- **A handshake hash for free.** Both sides end with the same handshake hash.
+  The 6-digit verification code and (in phase 3) the data-stream
+  `session_token` are derived from it.
+- **Easy to write a compatible client:** Noise libraries exist for Kotlin,
+  C, Go and others.
+
+**Alternatives:**
+- TLS 1.3 with self-signed certificates and pinning (rustls): mature and fast,
+  but certificate generation, storage and custom verifiers add complexity for
+  no gain here.
+- Noise IK: one fewer round trip, but the initiator must already know the
+  responder's static key, which isn't true for unknown devices. XX works for
+  both first contact and trusted peers.
+- Our own construction (X25519 + HKDF + ChaCha20-Poly1305): no. That's the
+  "don't invent crypto" rule.
+
+**Details:**
+- **Prologue:** `beam/1` is mixed into the handshake, so a Beam handshake
+  can't be confused with another Noise protocol.
+- **Handshake timeout:** 10 s, so a peer that stalls can't tie up the
+  receiver.
+
+## 2026-10-27 — HELLO's device id must match the key from the handshake
+
+**What:** After the handshake, each side checks two things:
+1. `HELLO.device_id` is derived from the static key the handshake proved.
+2. If that id is trusted, the proven key equals the stored key exactly.
+
+Either failure closes the connection.
+
+**Why:** The handshake proves who holds a key; HELLO is just a claim. Binding
+the two means an attacker can't show a trusted device's id (or a familiar
+name) with its own key. The best it can do is appear as an unknown device,
+which is never auto-accepted and shows a verification code that won't match.
+
+**Alternatives:** Trusting by name, or by id alone. Names are free text, and
+the 8-byte id is a short fingerprint, so trust always compares the full
+32-byte key.
+
+## 2026-10-27 — Verification code from the handshake hash
+
+**What:**
+`code = u64_le(BLAKE3-derive_key("beam 2026-10-27 verification code v1", handshake_hash)[0..8]) mod 10^6`
+
+**Why:** Both ends of one Noise session share the handshake hash. A
+man-in-the-middle runs two sessions with different hashes, so the codes
+differ with probability 1 − 10⁻⁶. BLAKE3's `derive_key` mode adds domain
+separation, so the code can't collide with other values derived from the same
+hash (such as the phase 3 `session_token`). Taking 64 bits mod 10⁶ makes the
+bias negligible.
+
+## 2026-10-27 — Identity and trust storage for the CLI
+
+**What:**
+- `identity.json` holds the private and public key in hex. It is created
+  with mode 0600 on Unix and lives in the user's config folder
+  (`%APPDATA%\Beam` on Windows, `--config-dir` to override).
+- `trusted_devices.json` lists `{device_id, name, public_key, auto_accept}`.
+  It is written to a temp file and renamed into place, so a crash never leaves
+  it half-written. On load, each stored id is checked against its key.
+
+**Why:** Phase 2 asks for a config-dir file for the CLI. The desktop app
+moves the key to DPAPI / Credential Manager in phase 5, and Android to the
+Keystore in phase 6. The core only needs `Identity` and `TrustStore`, not the
+storage backend.
+
+## 2026-10-27 — Trust store re-reads the file on every lookup
+
+**What:** `TrustStore::get`, `list`, `upsert` and `remove` re-read
+`trusted_devices.json` each time. If the file can't be read or parsed, lookups
+fail (fail closed) instead of falling back to a cached copy.
+
+**Why:** Found by hand-testing. A running `beam-cli receive` kept its own copy
+of the trust list, so `beam-cli trust remove` in another terminal didn't
+revoke trust until a restart: the removed device was still auto-accepted.
+Revocation has to take effect immediately. The file is tiny, so re-reading
+it per connection costs nothing. Re-reading before each change also stops
+one process from overwriting another's edits with a stale list. The
+regression test is `removal_by_another_process_takes_effect_immediately`.
+
+**Alternatives:** Watching the file for changes (more code, and platform
+differences); caching with an mtime check (timestamps can be coarse, so a
+quick remove-then-add could be missed).
+
+## 2026-10-27 — Phase 1 follow-up: device ids
+
+The phase 1 note "the device id is random per run" no longer applies. It is
+now derived from the persisted static key, as described above.

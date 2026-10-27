@@ -1,6 +1,7 @@
-//! The receiving side of a transfer: HELLO → OFFER → ask the user → ACCEPT →
-//! write DATA into `<name>.beam-part`, verify every chunk and the whole file,
-//! rename to the final name → TRANSFER_COMPLETE.
+//! The receiving side of a transfer: Noise handshake → HELLO → OFFER → ask
+//! the user (unless the sender is trusted with auto-accept) → ACCEPT → write
+//! DATA into `<name>.beam-part`, verify every chunk and the whole file, rename
+//! to the final name → TRANSFER_COMPLETE.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -17,28 +18,31 @@ use uuid::Uuid;
 use crate::connection::{Connection, ConnectionError, RecordCipher};
 use crate::frame::Frame;
 use crate::messages::{
-    Accept, Cancel, ChunkHash, Data, FileDone, FileEntry, Hello, Offer, Reject, TransferComplete,
+    Accept, Cancel, ChunkHash, Data, FileDone, FileEntry, Offer, Reject, TransferComplete,
     TransferStats,
 };
 use crate::sanitize::{sanitize_file_name, unique_file_name, PART_SUFFIX};
+use crate::secure::Role;
 use crate::transfer::{
-    chunk_count, chunk_end, exchange_hello, DeviceInfo, Progress, TransferError, TransferSummary,
-    MAX_FILES_PER_OFFER, MAX_RAW_NAME_BYTES,
+    chunk_count, chunk_end, establish_session, LocalDevice, PeerInfo, Progress, TransferError,
+    TransferSummary, MAX_FILES_PER_OFFER, MAX_RAW_NAME_BYTES,
 };
+use crate::trust::TrustStore;
 
 const FILE_WRITE_BUFFER: usize = 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ReceiverConfig {
-    pub device: DeviceInfo,
+    pub device: LocalDevice,
     pub download_dir: PathBuf,
+    pub trust: TrustStore,
 }
 
 /// What the user is asked to accept. File names are already sanitized.
 #[derive(Debug, Clone)]
 pub struct IncomingOffer {
     pub transfer_id: Uuid,
-    pub from: Hello,
+    pub from: PeerInfo,
     pub files: Vec<FileEntry>,
     pub total_size: u64,
 }
@@ -59,12 +63,14 @@ pub struct SavedFile {
 #[derive(Debug)]
 pub enum ReceiveOutcome {
     Completed {
-        from: Hello,
+        from: PeerInfo,
+        /// True when the sender is trusted with auto-accept, so nobody was asked.
+        auto_accepted: bool,
         files: Vec<SavedFile>,
         summary: TransferSummary,
     },
     Rejected {
-        from: Hello,
+        from: PeerInfo,
     },
 }
 
@@ -106,24 +112,27 @@ impl Receiver {
             .await
             .map_err(ConnectionError::from)?;
         stream.set_nodelay(true).map_err(ConnectionError::from)?;
-        receive_transfer(Connection::plain(stream), &self.config, decide, on_progress).await
+        receive_transfer(stream, &self.config, decide, on_progress).await
     }
 }
 
-/// Runs the receiver protocol over an established connection.
-pub async fn receive_transfer<S, C, D, F>(
-    mut conn: Connection<S, C>,
+/// Runs the receiver protocol (handshake included) over a connected stream.
+///
+/// `decide` is called for every offer except those from a trusted device
+/// with auto-accept on. Unknown devices are never accepted automatically.
+pub async fn receive_transfer<S, D, F>(
+    stream: S,
     config: &ReceiverConfig,
     decide: D,
     mut on_progress: impl FnMut(Progress),
 ) -> Result<ReceiveOutcome, TransferError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
-    C: RecordCipher,
     D: FnOnce(IncomingOffer) -> F,
     F: Future<Output = Decision>,
 {
-    let from = exchange_hello(&mut conn, &config.device, false).await?;
+    let (mut conn, from) =
+        establish_session(stream, &config.device, &config.trust, Role::Responder).await?;
     let offer = match conn.read_frame().await? {
         Frame::Offer(offer) => offer,
         other => return Err(TransferError::unexpected("OFFER", &other)),
@@ -154,7 +163,13 @@ where
         total_size: offer.total_size,
     };
     let files = incoming.files.clone();
-    if let Decision::Reject(reason) = decide(incoming).await {
+    let auto_accepted = from.trusted.as_ref().is_some_and(|t| t.auto_accept);
+    let decision = if auto_accepted {
+        Decision::Accept
+    } else {
+        decide(incoming).await
+    };
+    if let Decision::Reject(reason) = decision {
         conn.send(&Frame::Reject(Reject {
             transfer_id,
             reason,
@@ -192,6 +207,7 @@ where
             let _ = conn.shutdown().await;
             Ok(ReceiveOutcome::Completed {
                 from,
+                auto_accepted,
                 summary: TransferSummary {
                     files: offer.files.len(),
                     bytes: offer.total_size,

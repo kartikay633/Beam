@@ -1,9 +1,8 @@
 //! Moves frames over a byte stream, through a pluggable [`RecordCipher`].
 //!
 //! Wire format: a sequence of *records*, each `len:u16 (big-endian) | bytes`.
-//! A record is exactly what one Noise transport message will be in phase 2
-//! (at most 65,535 bytes), so the cipher is the only thing that changes when
-//! encryption arrives.
+//! Each record is one Noise transport message (at most 65,535 bytes), made by
+//! [`crate::secure::NoiseCipher`].
 //!
 //! Inside the records, each frame is prefixed with `len:u32` and may span
 //! several records; a record never holds parts of two frames. DATA frames are
@@ -16,7 +15,7 @@ use crate::frame::{encode_data, Frame, FrameError, DATA_HEADER_LEN};
 
 /// Largest record on the wire: the Noise transport message limit.
 pub const MAX_RECORD_LEN: usize = 65_535;
-/// Bytes reserved per record for an AEAD tag (ChaCha20-Poly1305 in phase 2).
+/// Bytes per record taken by the ChaCha20-Poly1305 tag.
 pub const RECORD_OVERHEAD: usize = 16;
 /// Largest plaintext a record can carry.
 pub const MAX_RECORD_PLAINTEXT: usize = MAX_RECORD_LEN - RECORD_OVERHEAD;
@@ -33,8 +32,8 @@ const IO_BUFFER: usize = 256 * 1024;
 const _: () =
     assert!(FRAME_LEN_PREFIX + 1 + DATA_HEADER_LEN + DATA_PAYLOAD_LEN <= MAX_RECORD_PLAINTEXT);
 
-/// Turns record plaintext into record bytes and back. Phase 1 uses
-/// [`PlainCipher`]; phase 2 adds a Noise implementation.
+/// Turns record plaintext into record bytes and back. Real sessions use
+/// [`crate::secure::NoiseCipher`].
 pub trait RecordCipher: Send {
     /// Appends the protected form of `plaintext` to `out`. Must add at most
     /// [`RECORD_OVERHEAD`] bytes.
@@ -47,7 +46,8 @@ pub trait RecordCipher: Send {
 #[error("record cipher failed: {0}")]
 pub struct CipherError(pub String);
 
-/// No encryption: records carry the plaintext unchanged.
+/// No encryption: records carry the plaintext unchanged. Only for testing the
+/// framing layer; transfers always use Noise.
 #[derive(Debug, Default)]
 pub struct PlainCipher;
 
@@ -77,6 +77,10 @@ pub enum ConnectionError {
     FrameTooLarge(usize),
     #[error("malformed record stream: {0}")]
     BadRecord(&'static str),
+    #[error("secure handshake failed: {0}")]
+    Handshake(String),
+    #[error("timed out waiting for the {0}")]
+    Timeout(&'static str),
 }
 
 pub struct Connection<S, C = PlainCipher> {
@@ -201,6 +205,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin, C: RecordCipher> Connection<S, C> {
                 ));
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cipher_mut(&mut self) -> &mut C {
+        &mut self.cipher
     }
 
     /// Flushes and shuts down the write half so the peer sees a clean close.
