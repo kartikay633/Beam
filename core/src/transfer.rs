@@ -6,15 +6,27 @@ use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::connection::{Connection, ConnectionError, RecordCipher};
+use crate::connection::{Connection, ConnectionError};
 use crate::frame::Frame;
 use crate::identity::{Identity, KEY_LEN};
 use crate::messages::{DeviceId, DeviceType, Hello, ProtocolVersion, PROTOCOL_VERSION};
-use crate::secure::{secure_connection, NoiseCipher, Role};
+use crate::secure::{secure_connection, HandshakeInfo, Role};
 use crate::trust::{TrustStore, TrustedDevice};
 
 /// Unit of hashing, resume and scheduling (SPEC.md section 7.3).
 pub const CHUNK_SIZE: u64 = 4 * 1024 * 1024;
+/// Keepalive: each side sends PING on the control connection this often...
+pub const PING_INTERVAL: Duration = Duration::from_secs(5);
+/// ...and gives up on a control connection that has been silent this long.
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Receiver batches CHUNK_ACKs for at most this long.
+pub const ACK_INTERVAL: Duration = Duration::from_millis(250);
+/// Receiver saves its progress file at least this often.
+pub const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
+/// Most parallel data connections per transfer.
+pub const MAX_STREAMS: usize = 16;
+/// A chunk that fails its hash this many times ends the transfer.
+pub const MAX_CHUNK_RETRIES: u32 = 5;
 /// Offers with more files than this are rejected.
 pub const MAX_FILES_PER_OFFER: usize = 10_000;
 /// Offers containing a file name longer than this (before sanitizing) are rejected.
@@ -77,11 +89,25 @@ pub struct Progress {
     pub files_total: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct TransferSummary {
     pub files: usize,
+    /// Total size of the files in the transfer.
     pub bytes: u64,
+    /// From ACCEPT to TRANSFER_COMPLETE (the user's decision time is excluded).
     pub duration: Duration,
+    /// Connect + handshake + HELLO for the first connection.
+    pub setup: Duration,
+    /// Parallel data connections used.
+    pub streams: usize,
+    /// Times the connection dropped and was re-established.
+    pub reconnects: u32,
+    /// Chunks sent again because they failed verification.
+    pub resent_chunks: u32,
+    /// Bytes the receiver already had when the transfer (re)started.
+    pub resumed_bytes: u64,
+    /// Highest throughput over any one-second window, in MB/s (sender only).
+    pub peak_mb_per_s: f64,
 }
 
 impl TransferSummary {
@@ -127,9 +153,34 @@ pub enum TransferError {
     TrustedKeyMismatch { device_id: DeviceId, name: String },
     #[error(transparent)]
     TrustStore(#[from] crate::trust::TrustStoreError),
+    #[error("the receiver's key changed after reconnecting; refusing to resume")]
+    PeerChanged,
+    #[error("chunk {chunk} of {file} failed verification {MAX_CHUNK_RETRIES} times")]
+    TooManyRetries { file: String, chunk: u64 },
+    #[error("could not reconnect within {seconds} s; last error: {last}")]
+    ReconnectFailed {
+        seconds: u64,
+        last: Box<TransferError>,
+    },
+    #[error("a newer connection took over this transfer")]
+    Superseded,
+    #[error("data connection rejected: {0}")]
+    BadDataStream(String),
 }
 
 impl TransferError {
+    /// Errors that mean "the network went away", after which the sender
+    /// reconnects and resumes. Everything else (a decision, an attack, a
+    /// protocol bug, a local file problem) ends the transfer.
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            TransferError::Connection(
+                ConnectionError::Io(_) | ConnectionError::Closed | ConnectionError::Timeout(_)
+            )
+        )
+    }
+
     pub(crate) fn local_file(path: &Path) -> impl FnOnce(io::Error) -> TransferError + '_ {
         move |source| TransferError::LocalFile {
             path: path.display().to_string(),
@@ -152,34 +203,67 @@ pub fn chunk_end(index: u64, size: u64) -> u64 {
     index.saturating_add(1).saturating_mul(CHUNK_SIZE).min(size)
 }
 
-/// Sets up a session on a fresh TCP stream:
+/// Sender side of setting up a control connection:
 ///
 /// 1. Noise XX handshake, which proves the peer holds its static key.
-/// 2. Encrypted HELLO exchange and version check.
-/// 3. Identity check: the device id in HELLO must be derived from the key the
-///    handshake proved, and if that id is trusted, the key must be exactly the
-///    trusted one. Otherwise the connection is refused.
-pub(crate) async fn establish_session<S>(
+/// 2. Encrypted HELLO exchange (we speak first) and version check.
+/// 3. Identity check (see [`verify_peer`]).
+pub(crate) async fn open_control<S>(
     stream: S,
     me: &LocalDevice,
     trust: &TrustStore,
-    role: Role,
-) -> Result<(Connection<S, NoiseCipher>, PeerInfo), TransferError>
+) -> Result<(Connection<S>, PeerInfo, HandshakeInfo), TransferError>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let (mut conn, handshake) = secure_connection(stream, &me.identity, role).await?;
-    let hello = exchange_hello(&mut conn, me, role == Role::Initiator).await?;
+    let (mut conn, handshake) = secure_connection(stream, &me.identity, Role::Initiator).await?;
+    conn.send(&Frame::Hello(me.hello())).await?;
+    let hello = match conn.read_frame().await? {
+        Frame::Hello(hello) => hello,
+        other => return Err(TransferError::unexpected("HELLO", &other)),
+    };
+    let peer = verify_peer(hello, &handshake, trust)?;
+    Ok((conn, peer, handshake))
+}
+
+/// Receiver side, once the first frame on a new connection was a HELLO. We
+/// reply with our HELLO before checking, so both ends can report a version
+/// mismatch clearly.
+pub(crate) async fn answer_control<S>(
+    conn: &mut Connection<S>,
+    hello: Hello,
+    handshake: &HandshakeInfo,
+    me: &LocalDevice,
+    trust: &TrustStore,
+) -> Result<PeerInfo, TransferError>
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    conn.send(&Frame::Hello(me.hello())).await?;
+    verify_peer(hello, handshake, trust)
+}
+
+/// Checks the peer's HELLO against what the handshake proved: the major
+/// version must match, the device id must be derived from the proven key,
+/// and if that id is trusted the key must be exactly the trusted one.
+fn verify_peer(
+    hello: Hello,
+    handshake: &HandshakeInfo,
+    trust: &TrustStore,
+) -> Result<PeerInfo, TransferError> {
+    if hello.version.major != PROTOCOL_VERSION.major {
+        return Err(TransferError::VersionMismatch {
+            ours: PROTOCOL_VERSION,
+            peer: hello.version,
+        });
+    }
     let trusted = check_peer_identity(&hello, &handshake.remote_public_key, trust)?;
-    Ok((
-        conn,
-        PeerInfo {
-            hello,
-            public_key: handshake.remote_public_key,
-            verification_code: handshake.verification_code(),
-            trusted,
-        },
-    ))
+    Ok(PeerInfo {
+        hello,
+        public_key: handshake.remote_public_key,
+        verification_code: handshake.verification_code(),
+        trusted,
+    })
 }
 
 fn check_peer_identity(
@@ -205,35 +289,136 @@ fn check_peer_identity(
     }
 }
 
-/// Exchanges HELLO frames and checks the peer's major version. The side that
-/// opened the connection speaks first; the other replies before checking, so
-/// both ends can report a version mismatch clearly.
-async fn exchange_hello<S, C>(
-    conn: &mut Connection<S, C>,
-    me: &LocalDevice,
-    speak_first: bool,
-) -> Result<Hello, TransferError>
+/// Reads control frames in a task of their own and forwards them. Reading
+/// isn't cancel-safe, so it can't sit directly in a `select!`. A control
+/// connection that stays silent for [`IDLE_TIMEOUT`] counts as dead (both
+/// sides PING every [`PING_INTERVAL`]). The first error ends the task.
+pub(crate) fn spawn_control_reader<R>(
+    tasks: &mut tokio::task::JoinSet<()>,
+    mut reader: crate::connection::FrameReader<R>,
+) -> tokio::sync::mpsc::Receiver<Result<Frame, TransferError>>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
-    C: RecordCipher,
+    R: AsyncRead + Unpin + Send + 'static,
 {
-    if speak_first {
-        conn.send(&Frame::Hello(me.hello())).await?;
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    tasks.spawn(async move {
+        loop {
+            let result = match tokio::time::timeout(IDLE_TIMEOUT, reader.read_frame()).await {
+                Ok(Ok(frame)) => Ok(frame),
+                Ok(Err(e)) => Err(e.into()),
+                Err(_) => Err(ConnectionError::Timeout("keepalive from the peer").into()),
+            };
+            let failed = result.is_err();
+            if tx.send(result).await.is_err() || failed {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// Positional write: `buf` at `offset`, independent of any file cursor, so
+/// chunks can land in any order.
+pub(crate) fn write_all_at(
+    file: &std::fs::File,
+    mut buf: &[u8],
+    mut offset: u64,
+) -> io::Result<()> {
+    while !buf.is_empty() {
+        #[cfg(unix)]
+        let written = std::os::unix::fs::FileExt::write_at(file, buf, offset)?;
+        #[cfg(windows)]
+        let written = std::os::windows::fs::FileExt::seek_write(file, buf, offset)?;
+        if written == 0 {
+            return Err(io::ErrorKind::WriteZero.into());
+        }
+        buf = &buf[written..];
+        offset += written as u64;
     }
-    let peer = match conn.read_frame().await? {
-        Frame::Hello(hello) => hello,
-        other => return Err(TransferError::unexpected("HELLO", &other)),
-    };
-    if !speak_first {
-        conn.send(&Frame::Hello(me.hello())).await?;
+    Ok(())
+}
+
+/// Positional read of exactly `buf.len()` bytes at `offset`.
+pub(crate) fn read_exact_at(
+    file: &std::fs::File,
+    mut buf: &mut [u8],
+    mut offset: u64,
+) -> io::Result<()> {
+    while !buf.is_empty() {
+        #[cfg(unix)]
+        let read = std::os::unix::fs::FileExt::read_at(file, buf, offset)?;
+        #[cfg(windows)]
+        let read = std::os::windows::fs::FileExt::seek_read(file, buf, offset)?;
+        if read == 0 {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        buf = &mut buf[read..];
+        offset += read as u64;
     }
-    if peer.version.major != PROTOCOL_VERSION.major {
-        return Err(TransferError::VersionMismatch {
-            ours: PROTOCOL_VERSION,
-            peer: peer.version,
-        });
+    Ok(())
+}
+
+/// BLAKE3 of a whole file, using all CPU cores. Reads in fixed-size blocks
+/// rather than memory-mapping, so memory use stays flat for huge files (a
+/// mapped file counts toward the process's resident memory).
+pub(crate) fn hash_file(path: &Path) -> io::Result<blake3::Hash> {
+    use std::io::Read;
+    const BLOCK: usize = 4 * 1024 * 1024;
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let mut hasher = blake3::Hasher::new();
+    let mut block = vec![0u8; BLOCK.min(len as usize).max(1)];
+    let block_len = block.len();
+    loop {
+        let mut filled = 0;
+        while filled < block_len {
+            match file.read(&mut block[filled..])? {
+                0 => break,
+                n => filled += n,
+            }
+        }
+        if filled == 0 {
+            break;
+        }
+        hasher.update_rayon(&block[..filled]);
+        if filled < block_len {
+            break;
+        }
     }
-    Ok(peer)
+    Ok(hasher.finalize())
+}
+
+/// Tracks the best throughput over one-second windows.
+#[derive(Debug, Default)]
+pub(crate) struct PeakMeter {
+    window_start: Option<std::time::Instant>,
+    window_bytes: u64,
+    peak: f64,
+}
+
+impl PeakMeter {
+    pub(crate) fn add(&mut self, bytes: u64) {
+        let now = std::time::Instant::now();
+        let start = *self.window_start.get_or_insert(now);
+        self.window_bytes += bytes;
+        let elapsed = now - start;
+        if elapsed >= Duration::from_secs(1) {
+            let rate = self.window_bytes as f64 / 1_000_000.0 / elapsed.as_secs_f64();
+            self.peak = self.peak.max(rate);
+            self.window_start = Some(now);
+            self.window_bytes = 0;
+        }
+    }
+
+    /// Peak MB/s, or `fallback` (the average) for transfers shorter than a
+    /// second.
+    pub(crate) fn peak_or(&self, fallback: f64) -> f64 {
+        if self.peak == 0.0 {
+            fallback
+        } else {
+            self.peak.max(fallback)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -306,6 +491,7 @@ mod tests {
             files: 1,
             bytes: 50_000_000,
             duration: Duration::from_secs(2),
+            ..TransferSummary::default()
         };
         assert_eq!(summary.megabytes_per_second(), 25.0);
     }

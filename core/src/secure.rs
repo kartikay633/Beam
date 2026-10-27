@@ -3,13 +3,20 @@
 //! Handshake messages use the same record format as everything else
 //! (`len:u16 | message`). After the three XX messages both sides know each
 //! other's static public key, and every later record is one Noise transport
-//! message, produced by [`NoiseCipher`].
+//! message.
+//!
+//! The transport state is snow's *stateless* variant shared by a
+//! [`NoiseSealer`] and a [`NoiseOpener`], each keeping its own nonce counter,
+//! so the two directions of a connection can be used from different tasks.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::connection::{CipherError, Connection, ConnectionError, RecordCipher, MAX_RECORD_LEN};
+use crate::connection::{
+    CipherError, Connection, ConnectionError, RecordOpener, RecordSealer, MAX_RECORD_LEN,
+};
 use crate::identity::{Identity, KEY_LEN};
 
 pub const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
@@ -20,6 +27,7 @@ const PROLOGUE: &[u8] = b"beam/1";
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const AEAD_TAG_LEN: usize = 16;
 const VERIFICATION_CODE_CONTEXT: &str = "beam 2026-10-27 verification code v1";
+const SESSION_TOKEN_CONTEXT: &str = "beam 2026-10-27 session token v1";
 
 pub(crate) fn noise_params() -> snow::params::NoiseParams {
     NOISE_PATTERN.parse().expect("valid Noise pattern")
@@ -51,32 +59,50 @@ impl HandshakeInfo {
         let number = u64::from_le_bytes(key[..8].try_into().expect("8 bytes")) % 1_000_000;
         format!("{number:06}")
     }
+
+    /// Token that binds data connections to this (control) session. It
+    /// identifies the session; it is not a secret. Data connections are
+    /// authenticated by their own handshake proving the same static key.
+    pub fn session_token(&self) -> [u8; 32] {
+        blake3::derive_key(SESSION_TOKEN_CONTEXT, &self.handshake_hash)
+    }
 }
 
-/// Encrypts each record as one Noise transport message.
-pub struct NoiseCipher {
-    transport: snow::TransportState,
+/// Encrypts outgoing records as Noise transport messages.
+pub struct NoiseSealer {
+    state: Arc<snow::StatelessTransportState>,
+    nonce: u64,
 }
 
-impl RecordCipher for NoiseCipher {
+/// Decrypts and authenticates incoming Noise transport messages.
+pub struct NoiseOpener {
+    state: Arc<snow::StatelessTransportState>,
+    nonce: u64,
+}
+
+impl RecordSealer for NoiseSealer {
     fn seal(&mut self, plaintext: &[u8], out: &mut Vec<u8>) -> Result<(), CipherError> {
         let start = out.len();
         out.resize(start + plaintext.len() + AEAD_TAG_LEN, 0);
         let written = self
-            .transport
-            .write_message(plaintext, &mut out[start..])
+            .state
+            .write_message(self.nonce, plaintext, &mut out[start..])
             .map_err(|e| CipherError(e.to_string()))?;
+        self.nonce += 1;
         out.truncate(start + written);
         Ok(())
     }
+}
 
+impl RecordOpener for NoiseOpener {
     fn open(&mut self, record: &[u8], out: &mut Vec<u8>) -> Result<(), CipherError> {
         let start = out.len();
         out.resize(start + record.len(), 0);
         let written = self
-            .transport
-            .read_message(record, &mut out[start..])
+            .state
+            .read_message(self.nonce, record, &mut out[start..])
             .map_err(|_| CipherError("record failed authentication".to_string()))?;
+        self.nonce += 1;
         out.truncate(start + written);
         Ok(())
     }
@@ -93,9 +119,9 @@ pub async fn secure_connection<S>(
     stream: S,
     identity: &Identity,
     role: Role,
-) -> Result<(Connection<S, NoiseCipher>, HandshakeInfo), ConnectionError>
+) -> Result<(Connection<S>, HandshakeInfo), ConnectionError>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake(stream, identity, role))
         .await
@@ -106,9 +132,9 @@ async fn handshake<S>(
     mut stream: S,
     identity: &Identity,
     role: Role,
-) -> Result<(Connection<S, NoiseCipher>, HandshakeInfo), ConnectionError>
+) -> Result<(Connection<S>, HandshakeInfo), ConnectionError>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let builder = snow::Builder::new(noise_params())
         .local_private_key(identity.private_key())?
@@ -150,10 +176,18 @@ where
         .get_handshake_hash()
         .try_into()
         .map_err(|_| ConnectionError::Handshake("unexpected handshake hash length".into()))?;
-    let transport = state.into_transport_mode()?;
+    let transport = Arc::new(state.into_stateless_transport_mode()?);
 
+    let sealer = NoiseSealer {
+        state: transport.clone(),
+        nonce: 0,
+    };
+    let opener = NoiseOpener {
+        state: transport,
+        nonce: 0,
+    };
     Ok((
-        Connection::new(stream, NoiseCipher { transport }),
+        Connection::new(stream, Box::new(sealer), Box::new(opener)),
         HandshakeInfo {
             remote_public_key,
             handshake_hash,
@@ -166,21 +200,11 @@ mod tests {
     use super::*;
     use crate::frame::Frame;
     use crate::messages::Ping;
-    use tokio::io::duplex;
+    use tokio::io::{duplex, DuplexStream};
 
-    async fn connected_pair(
-        a: &Identity,
-        b: &Identity,
-    ) -> (
-        (
-            Connection<tokio::io::DuplexStream, NoiseCipher>,
-            HandshakeInfo,
-        ),
-        (
-            Connection<tokio::io::DuplexStream, NoiseCipher>,
-            HandshakeInfo,
-        ),
-    ) {
+    type Side = (Connection<DuplexStream>, HandshakeInfo);
+
+    async fn connected_pair(a: &Identity, b: &Identity) -> (Side, Side) {
         let (x, y) = duplex(1 << 20);
         let (first, second) = tokio::join!(
             secure_connection(x, a, Role::Initiator),
@@ -198,18 +222,20 @@ mod tests {
         assert_eq!(&b_info.remote_public_key, alice.public_key());
         assert_eq!(a_info.handshake_hash, b_info.handshake_hash);
         assert_eq!(a_info.verification_code(), b_info.verification_code());
+        assert_eq!(a_info.session_token(), b_info.session_token());
         assert_eq!(a_info.verification_code().len(), 6);
+        assert_ne!(
+            &a_info.session_token()[..],
+            &a_info.handshake_hash[..],
+            "domain-separated"
+        );
 
-        a.send(&Frame::Ping(Ping { nonce: 7 })).await.unwrap();
-        assert_eq!(
-            b.read_frame().await.unwrap(),
-            Frame::Ping(Ping { nonce: 7 })
-        );
-        b.send(&Frame::Pong(Ping { nonce: 7 })).await.unwrap();
-        assert_eq!(
-            a.read_frame().await.unwrap(),
-            Frame::Pong(Ping { nonce: 7 })
-        );
+        for nonce in 0..100 {
+            a.send(&Frame::Ping(Ping { nonce })).await.unwrap();
+            assert_eq!(b.read_frame().await.unwrap(), Frame::Ping(Ping { nonce }));
+            b.send(&Frame::Pong(Ping { nonce })).await.unwrap();
+            assert_eq!(a.read_frame().await.unwrap(), Frame::Pong(Ping { nonce }));
+        }
     }
 
     #[tokio::test]
@@ -226,14 +252,30 @@ mod tests {
         let ((mut a, _), (mut b, _)) = connected_pair(&alice, &bob).await;
 
         let mut record = Vec::new();
-        a.cipher_mut().seal(b"secret", &mut record).unwrap();
+        a.ciphers_mut().0.seal(b"secret", &mut record).unwrap();
         assert!(
             !record.windows(6).any(|w| w == b"secret"),
             "ciphertext hides it"
         );
         record[0] ^= 1;
         let mut opened = Vec::new();
-        assert!(b.cipher_mut().open(&record, &mut opened).is_err());
+        assert!(b.ciphers_mut().1.open(&record, &mut opened).is_err());
+    }
+
+    #[tokio::test]
+    async fn replayed_record_is_rejected() {
+        let (alice, bob) = (Identity::generate(), Identity::generate());
+        let ((mut a, _), (mut b, _)) = connected_pair(&alice, &bob).await;
+
+        let mut record = Vec::new();
+        a.ciphers_mut().0.seal(b"once", &mut record).unwrap();
+        let mut opened = Vec::new();
+        b.ciphers_mut().1.open(&record, &mut opened).unwrap();
+        assert_eq!(opened, b"once");
+        assert!(
+            b.ciphers_mut().1.open(&record, &mut opened).is_err(),
+            "the nonce moved on"
+        );
     }
 
     #[tokio::test]

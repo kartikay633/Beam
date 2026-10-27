@@ -1,110 +1,30 @@
 //! End-to-end transfers between an in-process sender and receiver over
-//! loopback TCP, including the security properties from SPEC.md section 6.
+//! loopback TCP: correctness, the security properties from SPEC.md section 6,
+//! and the speed/reliability properties from section 7.3 (parallel streams,
+//! corruption recovery, resume, chaos).
+
+mod common;
 
 use std::fs;
-use std::io::{BufWriter, Write};
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use beam_core::frame::Frame;
 use beam_core::messages::*;
 use beam_core::{
-    secure_connection, send_to, Connection, Decision, Identity, LocalDevice, NoiseCipher,
-    ReceiveOutcome, Receiver, ReceiverConfig, Role, SendEvent, SendOutcome, TransferError,
-    TrustStore, TrustedDevice,
+    secure_connection, send_to, Connection, Decision, Identity, LocalDevice, Role, SendEvent,
+    SendOptions, SendOutcome, TrustStore,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use common::*;
 use tokio::net::{TcpListener, TcpStream};
 use uuid::Uuid;
 
-fn device(name: &str) -> LocalDevice {
-    LocalDevice {
-        identity: Identity::generate(),
-        name: name.to_string(),
-        device_type: DeviceType::Laptop,
+fn options(streams: usize) -> SendOptions {
+    SendOptions {
+        streams,
+        ..SendOptions::default()
     }
-}
-
-fn trust_of(devices: &[(&LocalDevice, bool)]) -> TrustStore {
-    let store = TrustStore::in_memory();
-    for (device, auto_accept) in devices {
-        store
-            .upsert(TrustedDevice::new(
-                device.name.clone(),
-                *device.identity.public_key(),
-                *auto_accept,
-            ))
-            .unwrap();
-    }
-    store
-}
-
-async fn start_receiver(me: LocalDevice, trust: TrustStore, download_dir: &Path) -> Receiver {
-    Receiver::bind(
-        "127.0.0.1:0",
-        ReceiverConfig {
-            device: me,
-            download_dir: download_dir.to_path_buf(),
-            trust,
-        },
-    )
-    .await
-    .unwrap()
-}
-
-/// Starts a receiver that accepts one transfer, answering every offer with
-/// `decision`, and returns its address and the task.
-async fn spawn_receiver(
-    me: LocalDevice,
-    trust: TrustStore,
-    download_dir: &Path,
-    decision: Decision,
-) -> (
-    SocketAddr,
-    tokio::task::JoinHandle<Result<ReceiveOutcome, TransferError>>,
-) {
-    let receiver = start_receiver(me, trust, download_dir).await;
-    let addr = receiver.local_addr().unwrap();
-    let task = tokio::spawn(async move {
-        receiver
-            .accept_transfer(|_| async move { decision }, |_| {})
-            .await
-    });
-    (addr, task)
-}
-
-/// Writes `size` pseudo-random bytes (BLAKE3 in XOF mode, seeded by `seed`).
-fn write_random_file(path: &Path, size: u64, seed: u64) {
-    let mut output = blake3::Hasher::new()
-        .update(&seed.to_le_bytes())
-        .finalize_xof();
-    let mut file = BufWriter::new(fs::File::create(path).unwrap());
-    let mut buf = vec![0u8; 1 << 20];
-    let mut remaining = size;
-    while remaining > 0 {
-        let n = remaining.min(buf.len() as u64) as usize;
-        output.fill(&mut buf[..n]);
-        file.write_all(&buf[..n]).unwrap();
-        remaining -= n as u64;
-    }
-    file.flush().unwrap();
-}
-
-fn hash_file(path: &Path) -> blake3::Hash {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update_reader(fs::File::open(path).unwrap()).unwrap();
-    hasher.finalize()
-}
-
-fn files_in(dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> = fs::read_dir(dir)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    names
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -132,27 +52,27 @@ async fn large_file_and_many_small_files_arrive_identical() {
         paths.push(path);
     }
 
-    let (addr, receiving) = spawn_receiver(
+    let mut receiver = TestReceiver::start(
         device("receiver"),
         TrustStore::in_memory(),
         &inbox,
-        Decision::Accept,
+        accept_all,
     )
     .await;
-
     let started = Instant::now();
     let sent = send_to(
-        addr,
+        receiver.addr,
         &device("sender"),
         &TrustStore::in_memory(),
         &paths,
+        &options(4),
         |_| {},
     )
     .await
     .unwrap();
-    let received = receiving.await.unwrap().unwrap();
+    let received = receiver.next_outcome().await;
     println!(
-        "transferred 501 files (200 MB) encrypted in {:.2?}",
+        "transferred 501 files (200 MB) over 4 streams in {:.2?}",
         started.elapsed()
     );
 
@@ -160,20 +80,249 @@ async fn large_file_and_many_small_files_arrive_identical() {
         panic!("transfer was rejected");
     };
     assert_eq!(summary.files, 501);
-    let ReceiveOutcome::Completed { files, from, .. } = received else {
-        panic!("receiver did not complete");
+    assert_eq!(summary.streams, 4);
+    let Finished::Completed {
+        from,
+        files,
+        summary: received_summary,
+        ..
+    } = received
+    else {
+        panic!("receiver did not complete: {received:?}");
     };
-    assert_eq!(from.name(), "sender");
+    assert_eq!(from, "sender");
     assert_eq!(files.len(), 501);
+    assert_eq!(received_summary.streams, 4);
 
     for path in &paths {
         let saved = inbox.join(path.file_name().unwrap());
         assert_eq!(hash_file(path), hash_file(&saved), "{}", saved.display());
     }
-    assert!(
-        files_in(&inbox).iter().all(|n| !n.ends_with(".beam-part")),
-        "no partial files are left behind"
+    assert_eq!(
+        files_in(&inbox).len(),
+        501,
+        "only finished files remain (no .beam-part files, no progress folder)"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_thousand_small_files_are_pipelined() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir(&src).unwrap();
+    let paths: Vec<PathBuf> = (0..1_000u64)
+        .map(|i| {
+            let path = src.join(format!("f{i:04}.txt"));
+            write_random_file(&path, 10_000, i);
+            path
+        })
+        .collect();
+
+    let inbox = tmp.path().join("inbox");
+    let mut receiver = TestReceiver::start(
+        device("receiver"),
+        TrustStore::in_memory(),
+        &inbox,
+        accept_all,
+    )
+    .await;
+    let started = Instant::now();
+    let sent = send_to(
+        receiver.addr,
+        &device("sender"),
+        &TrustStore::in_memory(),
+        &paths,
+        &options(4),
+        |_| {},
+    )
+    .await
+    .unwrap();
+    let elapsed = started.elapsed();
+    println!("1,000 x 10 KB files took {elapsed:.2?}");
+    assert!(matches!(sent, SendOutcome::Completed(_)));
+    assert!(matches!(
+        receiver.next_outcome().await,
+        Finished::Completed { .. }
+    ));
+    assert_eq!(files_in(&inbox).len(), 1_000);
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "no round trip per file: {elapsed:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn corrupted_chunk_is_detected_and_sent_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("video.bin");
+    write_random_file(&file, 3 * 4 * 1024 * 1024 + 5, 9); // 4 chunks
+    let inbox = tmp.path().join("inbox");
+    let mut receiver = TestReceiver::start(
+        device("receiver"),
+        TrustStore::in_memory(),
+        &inbox,
+        accept_all,
+    )
+    .await;
+
+    let sent = send_to(
+        receiver.addr,
+        &device("sender"),
+        &TrustStore::in_memory(),
+        std::slice::from_ref(&file),
+        &SendOptions {
+            streams: 2,
+            corrupt_once: Some((0, 2)),
+            ..SendOptions::default()
+        },
+        |_| {},
+    )
+    .await
+    .unwrap();
+    let SendOutcome::Completed(summary) = sent else {
+        panic!("rejected");
+    };
+    assert_eq!(
+        summary.resent_chunks, 1,
+        "the corrupted chunk was sent twice"
+    );
+    let Finished::Completed {
+        summary: received, ..
+    } = receiver.next_outcome().await
+    else {
+        panic!("receiver did not complete");
+    };
+    assert_eq!(received.resent_chunks, 1, "the receiver caught it");
+    assert_eq!(hash_file(&file), hash_file(&inbox.join("video.bin")));
+}
+
+/// SPEC.md 11: kill the connection at random points 50 times; the transfer
+/// must resume and finish with an identical file.
+#[tokio::test(flavor = "multi_thread")]
+async fn chaos_fifty_disconnects_during_a_1_gb_transfer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("one-gigabyte.bin");
+    write_random_file(&file, 1_000_000_000, 42);
+    let inbox = tmp.path().join("inbox");
+    let mut receiver = TestReceiver::start(
+        device("receiver"),
+        TrustStore::in_memory(),
+        &inbox,
+        accept_all,
+    )
+    .await;
+    let proxy = Proxy::start(receiver.addr, false).await;
+    proxy.enable_chaos(50, 0x5eed);
+
+    let started = Instant::now();
+    let mut reconnect_events = 0;
+    let sent = send_to(
+        proxy.addr,
+        &device("sender"),
+        &TrustStore::in_memory(),
+        std::slice::from_ref(&file),
+        &options(4),
+        |event| {
+            if let SendEvent::Reconnecting { .. } = event {
+                reconnect_events += 1;
+            }
+        },
+    )
+    .await
+    .unwrap();
+    let SendOutcome::Completed(summary) = sent else {
+        panic!("rejected");
+    };
+    println!(
+        "1 GB with {} kills: {:.1?}, {} reconnects, {} reconnect attempts",
+        proxy.kills_done(),
+        started.elapsed(),
+        summary.reconnects,
+        reconnect_events
+    );
+    assert_eq!(proxy.kills_done(), 50, "all 50 kills happened");
+    assert!(summary.reconnects >= 1);
+    assert!(matches!(
+        receiver.next_outcome().await,
+        Finished::Completed { .. }
+    ));
+    assert_eq!(
+        hash_file(&file),
+        hash_file(&inbox.join("one-gigabyte.bin")),
+        "identical after 50 disconnects"
+    );
+    assert_eq!(files_in(&inbox), ["one-gigabyte.bin"]);
+}
+
+/// The receiver goes away completely mid-transfer (like a crash or an app
+/// restart). A new receiver with the same identity and download folder picks
+/// up the progress file, and only the missing chunks are sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_after_the_receiver_restarts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("movie.bin");
+    write_random_file(&file, 400_000_000, 7);
+    let inbox = tmp.path().join("inbox");
+    let receiver_device = device("laptop");
+    let sender_device = device("phone");
+
+    let first = TestReceiver::start(
+        receiver_device.clone(),
+        TrustStore::in_memory(),
+        &inbox,
+        accept_all,
+    )
+    .await;
+    let proxy = Proxy::start(first.addr, false).await;
+    let progress = first.progress.clone();
+
+    let sending = {
+        let (addr, file) = (proxy.addr, file.clone());
+        tokio::spawn(async move {
+            send_to(
+                addr,
+                &sender_device,
+                &TrustStore::in_memory(),
+                &[file],
+                &options(2),
+                |_| {},
+            )
+            .await
+        })
+    };
+
+    // Let roughly a quarter arrive, then pull the plug on the receiver.
+    while progress.load(std::sync::atomic::Ordering::Relaxed) < 100_000_000 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    drop(first);
+    proxy.kill_all();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let mut second = TestReceiver::start(receiver_device, TrustStore::in_memory(), &inbox, |_| {
+        panic!("a resumed transfer must not ask the user again")
+    })
+    .await;
+    proxy.set_backend(second.addr);
+
+    let sent = sending.await.unwrap().unwrap();
+    assert!(matches!(sent, SendOutcome::Completed(_)));
+    let Finished::Completed {
+        resumed, summary, ..
+    } = second.next_outcome().await
+    else {
+        panic!("second receiver did not complete");
+    };
+    assert!(resumed);
+    println!(
+        "resumed with {:.0} MB already on disk",
+        summary.resumed_bytes as f64 / 1e6
+    );
+    assert!(
+        summary.resumed_bytes >= 50_000_000,
+        "chunks from before the restart were kept"
+    );
+    assert_eq!(hash_file(&file), hash_file(&inbox.join("movie.bin")));
 }
 
 #[tokio::test]
@@ -183,35 +332,30 @@ async fn declined_transfer_reports_the_reason_and_writes_nothing() {
     fs::write(&file, b"hello").unwrap();
     let inbox = tmp.path().join("inbox");
 
-    let receiver = start_receiver(device("receiver"), TrustStore::in_memory(), &inbox).await;
-    let addr = receiver.local_addr().unwrap();
-    let receiving = tokio::spawn(async move {
-        receiver
-            .accept_transfer(
-                |offer| async move {
-                    assert_eq!(offer.files[0].name, "hello.txt");
-                    assert_eq!(offer.total_size, 5);
-                    Decision::Reject("not now".into())
-                },
-                |_| {},
-            )
-            .await
-    });
+    let mut receiver = TestReceiver::start(
+        device("receiver"),
+        TrustStore::in_memory(),
+        &inbox,
+        |offer| {
+            assert_eq!(offer.files[0].name, "hello.txt");
+            assert_eq!(offer.total_size, 5);
+            Decision::Reject("not now".into())
+        },
+    )
+    .await;
 
     let sent = send_to(
-        addr,
+        receiver.addr,
         &device("sender"),
         &TrustStore::in_memory(),
         &[file],
+        &options(4),
         |_| {},
     )
     .await
     .unwrap();
     assert!(matches!(sent, SendOutcome::Rejected { reason } if reason == "not now"));
-    assert!(matches!(
-        receiving.await.unwrap().unwrap(),
-        ReceiveOutcome::Rejected { .. }
-    ));
+    assert!(matches!(receiver.next_outcome().await, Finished::Rejected));
     assert!(!inbox.exists());
 }
 
@@ -223,32 +367,25 @@ async fn both_sides_see_the_same_verification_code() {
 
     let receiver_code = Arc::new(Mutex::new(None));
     let seen = receiver_code.clone();
-    let receiver = start_receiver(
+    let mut receiver = TestReceiver::start(
         device("receiver"),
         TrustStore::in_memory(),
         &tmp.path().join("in"),
+        move |offer| {
+            assert!(!offer.from.is_trusted());
+            *seen.lock().unwrap() = Some(offer.from.verification_code.clone());
+            Decision::Accept
+        },
     )
     .await;
-    let addr = receiver.local_addr().unwrap();
-    let receiving = tokio::spawn(async move {
-        receiver
-            .accept_transfer(
-                move |offer| {
-                    assert!(!offer.from.is_trusted());
-                    *seen.lock().unwrap() = Some(offer.from.verification_code.clone());
-                    async { Decision::Accept }
-                },
-                |_| {},
-            )
-            .await
-    });
 
     let mut sender_code = None;
     send_to(
-        addr,
+        receiver.addr,
         &device("sender"),
         &TrustStore::in_memory(),
         &[file],
+        &options(4),
         |event| {
             if let SendEvent::Connected(peer) = event {
                 sender_code = Some(peer.verification_code);
@@ -257,7 +394,7 @@ async fn both_sides_see_the_same_verification_code() {
     )
     .await
     .unwrap();
-    receiving.await.unwrap().unwrap();
+    receiver.next_outcome().await;
 
     let sender_code = sender_code.expect("sender saw the code");
     assert_eq!(sender_code.len(), 6);
@@ -273,29 +410,22 @@ async fn trusted_sender_with_auto_accept_skips_the_prompt() {
     let sender = device("phone");
     let receiver_device = device("laptop");
 
-    let receiver = start_receiver(
+    let mut receiver = TestReceiver::start(
         receiver_device.clone(),
         trust_of(&[(&sender, true)]),
         &tmp.path().join("in"),
+        |_| panic!("a trusted auto-accept sender must not be prompted"),
     )
     .await;
-    let addr = receiver.local_addr().unwrap();
-    let receiving = tokio::spawn(async move {
-        receiver
-            .accept_transfer(
-                |_| async { panic!("a trusted auto-accept sender must not be prompted") },
-                |_| {},
-            )
-            .await
-    });
 
     // The sender trusts the receiver too, and sees that.
     let mut sender_saw_trusted = false;
     let sent = send_to(
-        addr,
+        receiver.addr,
         &sender,
         &trust_of(&[(&receiver_device, false)]),
         &[file],
+        &options(4),
         |event| {
             if let SendEvent::Connected(peer) = event {
                 sender_saw_trusted = peer.is_trusted();
@@ -307,8 +437,8 @@ async fn trusted_sender_with_auto_accept_skips_the_prompt() {
     assert!(matches!(sent, SendOutcome::Completed(_)));
     assert!(sender_saw_trusted);
     assert!(matches!(
-        receiving.await.unwrap().unwrap(),
-        ReceiveOutcome::Completed {
+        receiver.next_outcome().await,
+        Finished::Completed {
             auto_accepted: true,
             ..
         }
@@ -322,30 +452,29 @@ async fn trusted_sender_without_auto_accept_is_still_asked() {
     fs::write(&file, b"a").unwrap();
     let sender = device("phone");
 
-    let receiver = start_receiver(
+    let mut receiver = TestReceiver::start(
         device("laptop"),
         trust_of(&[(&sender, false)]),
         &tmp.path().join("in"),
+        |offer| {
+            assert!(offer.from.is_trusted());
+            Decision::Reject("asked and said no".into())
+        },
     )
     .await;
-    let addr = receiver.local_addr().unwrap();
-    let receiving = tokio::spawn(async move {
-        receiver
-            .accept_transfer(
-                |offer| async move {
-                    assert!(offer.from.is_trusted());
-                    Decision::Reject("asked and said no".into())
-                },
-                |_| {},
-            )
-            .await
-    });
 
-    let sent = send_to(addr, &sender, &TrustStore::in_memory(), &[file], |_| {})
-        .await
-        .unwrap();
+    let sent = send_to(
+        receiver.addr,
+        &sender,
+        &TrustStore::in_memory(),
+        &[file],
+        &options(4),
+        |_| {},
+    )
+    .await
+    .unwrap();
     assert!(matches!(sent, SendOutcome::Rejected { .. }));
-    receiving.await.unwrap().unwrap();
+    assert!(matches!(receiver.next_outcome().await, Finished::Rejected));
 }
 
 /// An attacker that copies a trusted device's name and id but has its own
@@ -354,33 +483,28 @@ async fn trusted_sender_without_auto_accept_is_still_asked() {
 async fn impersonating_a_trusted_device_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let real_phone = device("Kartikay's Pixel");
-    let receiver = start_receiver(
+    let mut receiver = TestReceiver::start(
         device("laptop"),
         trust_of(&[(&real_phone, true)]),
         &tmp.path().join("in"),
+        |_| panic!("must not reach the offer"),
     )
     .await;
-    let addr = receiver.local_addr().unwrap();
-    let receiving = tokio::spawn(async move {
-        receiver
-            .accept_transfer(|_| async { panic!("must not reach the offer") }, |_| {})
-            .await
-    });
 
     let attacker = Identity::generate();
-    let stream = TcpStream::connect(addr).await.unwrap();
+    let stream = TcpStream::connect(receiver.addr).await.unwrap();
     let (mut conn, _) = secure_connection(stream, &attacker, Role::Initiator)
         .await
         .unwrap();
     // The real phone's HELLO: its name and id, but sent under the attacker's key.
     conn.send(&Frame::Hello(real_phone.hello())).await.unwrap();
 
-    let err = receiving.await.unwrap().unwrap_err();
+    let refused = receiver.next_refusal().await;
     assert!(
-        matches!(err, TransferError::IdentityMismatch { claimed, .. } if claimed == real_phone.device_id()),
-        "{err}"
+        refused.contains(&real_phone.device_id().to_string()),
+        "{refused}"
     );
-    assert!(err.to_string().contains("connection refused"));
+    assert!(refused.contains("connection refused"), "{refused}");
 }
 
 /// The sender trusts the real receiver. A man-in-the-middle answering on
@@ -397,28 +521,21 @@ async fn man_in_the_middle_is_detected_by_trust_and_verification_codes() {
     // The real receiver records the code it shows, then declines.
     let receiver_code = Arc::new(Mutex::new(String::new()));
     let seen = receiver_code.clone();
-    let receiver = start_receiver(
+    let mut receiver = TestReceiver::start(
         real_receiver.clone(),
         trust_of(&[(&sender, true)]),
         &tmp.path().join("in"),
+        move |offer| {
+            *seen.lock().unwrap() = offer.from.verification_code.clone();
+            assert!(
+                !offer.from.is_trusted(),
+                "the MITM is not the trusted phone"
+            );
+            Decision::Reject("unknown".into())
+        },
     )
     .await;
-    let receiver_addr = receiver.local_addr().unwrap();
-    let receiving = tokio::spawn(async move {
-        receiver
-            .accept_transfer(
-                move |offer| {
-                    *seen.lock().unwrap() = offer.from.verification_code.clone();
-                    assert!(
-                        !offer.from.is_trusted(),
-                        "the MITM is not the trusted phone"
-                    );
-                    async { Decision::Reject("unknown".into()) }
-                },
-                |_| {},
-            )
-            .await
-    });
+    let receiver_addr = receiver.addr;
 
     // The MITM terminates the sender's session with its own key, opens its
     // own session to the receiver, and relays HELLO, OFFER and the answer.
@@ -472,6 +589,7 @@ async fn man_in_the_middle_is_detected_by_trust_and_verification_codes() {
         &sender,
         &trust_of(&[(&real_receiver, false)]),
         &[file],
+        &options(4),
         |event| {
             if let SendEvent::Connected(peer) = event {
                 sender_view = Some(peer);
@@ -482,7 +600,7 @@ async fn man_in_the_middle_is_detected_by_trust_and_verification_codes() {
     .unwrap();
     assert!(matches!(sent, SendOutcome::Rejected { .. }));
     mitm.await.unwrap();
-    receiving.await.unwrap().unwrap();
+    assert!(matches!(receiver.next_outcome().await, Finished::Rejected));
 
     let sender_view = sender_view.unwrap();
     assert_eq!(sender_view.name(), "laptop", "the MITM copied the name…");
@@ -494,61 +612,45 @@ async fn man_in_the_middle_is_detected_by_trust_and_verification_codes() {
     );
 }
 
-async fn relay_one(
-    from: &mut Connection<TcpStream, NoiseCipher>,
-    to: &mut Connection<TcpStream, NoiseCipher>,
-) {
+async fn relay_one(from: &mut Connection<TcpStream>, to: &mut Connection<TcpStream>) {
     let frame = from.read_frame().await.unwrap();
     to.send(&frame).await.unwrap();
 }
 
-/// Records every byte that crosses the network and checks that neither the
-/// file contents nor the file name nor the device name appear in clear.
-#[tokio::test]
+/// Records every byte that crosses the network (control and data
+/// connections) and checks that neither the file contents nor the file name
+/// nor the device names appear in clear.
+#[tokio::test(flavor = "multi_thread")]
 async fn nothing_readable_crosses_the_wire() {
     let tmp = tempfile::tempdir().unwrap();
     let marker = b"BEAM-PLAINTEXT-MARKER ";
     let file = tmp.path().join("top-secret-plans.txt");
-    fs::write(&file, marker.repeat(10_000)).unwrap();
+    fs::write(&file, marker.repeat(500_000)).unwrap(); // 11 MB: several chunks
 
-    let (receiver_addr, receiving) = spawn_receiver(
+    let mut receiver = TestReceiver::start(
         device("receiver-laptop"),
         TrustStore::in_memory(),
         &tmp.path().join("in"),
-        Decision::Accept,
+        accept_all,
     )
     .await;
-
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let tap = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let tap_addr = tap.local_addr().unwrap();
-    let recording = captured.clone();
-    let proxy = tokio::spawn(async move {
-        let (client, _) = tap.accept().await.unwrap();
-        let server = TcpStream::connect(receiver_addr).await.unwrap();
-        let (client_read, client_write) = client.into_split();
-        let (server_read, server_write) = server.into_split();
-        tokio::join!(
-            pipe(client_read, server_write, recording.clone()),
-            pipe(server_read, client_write, recording),
-        );
-    });
+    let tap = Proxy::start(receiver.addr, true).await;
 
     let sent = send_to(
-        tap_addr,
+        tap.addr,
         &device("sender-phone"),
         &TrustStore::in_memory(),
         std::slice::from_ref(&file),
+        &options(4),
         |_| {},
     )
     .await
     .unwrap();
     assert!(matches!(sent, SendOutcome::Completed(_)));
-    receiving.await.unwrap().unwrap();
-    proxy.await.unwrap();
+    receiver.next_outcome().await;
 
-    let wire = captured.lock().unwrap().clone();
-    assert!(wire.len() > 200_000, "the file did cross the wire");
+    let wire = tap.recorded();
+    assert!(wire.len() > 11_000_000, "the file did cross the wire");
     for secret in [
         &marker[..],
         b"top-secret-plans",
@@ -567,41 +669,40 @@ async fn nothing_readable_crosses_the_wire() {
     );
 }
 
-async fn pipe(
-    mut from: tokio::net::tcp::OwnedReadHalf,
-    mut to: tokio::net::tcp::OwnedWriteHalf,
-    recording: Arc<Mutex<Vec<u8>>>,
-) {
-    let mut buf = vec![0u8; 64 * 1024];
+/// The next control frame that isn't a keepalive (PINGs are answered).
+async fn next_control_frame(raw: &mut RawSender) -> Frame {
     loop {
-        let n = match from.read(&mut buf).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => n,
-        };
-        recording.lock().unwrap().extend_from_slice(&buf[..n]);
-        if to.write_all(&buf[..n]).await.is_err() {
-            break;
+        match raw.control.read_frame().await.unwrap() {
+            Frame::Ping(p) => raw.control.send(&Frame::Pong(p)).await.unwrap(),
+            Frame::Pong(_) => {}
+            other => return other,
         }
     }
-    let _ = to.shutdown().await;
 }
 
 /// Speaks the protocol by hand (with real encryption) so tests can send
 /// things a well-behaved sender never would.
 struct RawSender {
-    conn: Connection<TcpStream, NoiseCipher>,
+    control: Connection<TcpStream>,
+    data: Connection<TcpStream>,
     transfer_id: Uuid,
 }
 
 impl RawSender {
-    async fn offer(addr: SocketAddr, files: &[(&str, &[u8])]) -> RawSender {
+    async fn offer(addr: std::net::SocketAddr, files: &[(&str, &[u8])]) -> RawSender {
         let me = device("raw");
-        let stream = TcpStream::connect(addr).await.unwrap();
-        let (mut conn, _) = secure_connection(stream, &me.identity, Role::Initiator)
-            .await
-            .unwrap();
-        conn.send(&Frame::Hello(me.hello())).await.unwrap();
-        assert!(matches!(conn.read_frame().await.unwrap(), Frame::Hello(_)));
+        let (mut control, handshake) = secure_connection(
+            TcpStream::connect(addr).await.unwrap(),
+            &me.identity,
+            Role::Initiator,
+        )
+        .await
+        .unwrap();
+        control.send(&Frame::Hello(me.hello())).await.unwrap();
+        assert!(matches!(
+            control.read_frame().await.unwrap(),
+            Frame::Hello(_)
+        ));
 
         let transfer_id = Uuid::new_v4();
         let entries: Vec<FileEntry> = files
@@ -616,39 +717,89 @@ impl RawSender {
             })
             .collect();
         let total_size = entries.iter().map(|e| e.size).sum();
-        conn.send(&Frame::Offer(Offer {
+        control
+            .send(&Frame::Offer(Offer {
+                transfer_id,
+                files: entries,
+                total_size,
+            }))
+            .await
+            .unwrap();
+        assert!(matches!(
+            control.read_frame().await.unwrap(),
+            Frame::Accept(_)
+        ));
+
+        let (mut data, _) = secure_connection(
+            TcpStream::connect(addr).await.unwrap(),
+            &me.identity,
+            Role::Initiator,
+        )
+        .await
+        .unwrap();
+        data.send(&Frame::StreamOpen(StreamOpen {
             transfer_id,
-            files: entries,
-            total_size,
+            session_token: handshake.session_token(),
+            stream_index: 0,
         }))
         .await
         .unwrap();
-        assert!(matches!(conn.read_frame().await.unwrap(), Frame::Accept(_)));
-        RawSender { conn, transfer_id }
+        RawSender {
+            control,
+            data,
+            transfer_id,
+        }
     }
 
-    /// Sends a small file as one DATA frame, one CHUNK_HASH and FILE_DONE.
-    /// `chunk_hash` overrides the correct chunk hash.
-    async fn send_file(&mut self, file_id: u32, bytes: &[u8], chunk_hash: Option<[u8; 32]>) {
-        if !bytes.is_empty() {
-            self.conn.write_data(file_id, 0, bytes).await.unwrap();
-            let hash = chunk_hash.unwrap_or(*blake3::hash(bytes).as_bytes());
-            self.conn
+    /// Sends small files (one chunk each), waits for their CHUNK_ACKs, then
+    /// sends FILE_DONE for all of them and waits for TRANSFER_COMPLETE.
+    async fn send_all(&mut self, files: &[(&str, &[u8])]) {
+        let mut waiting = std::collections::HashSet::new();
+        for (i, (_, bytes)) in files.iter().enumerate() {
+            if bytes.is_empty() {
+                continue;
+            }
+            self.data.write_data(i as u32, 0, bytes).await.unwrap();
+            self.data
                 .write_frame(&Frame::ChunkHash(ChunkHash {
-                    file_id,
+                    file_id: i as u32,
                     chunk_index: 0,
-                    blake3: Hash32(hash),
+                    blake3: blake3::hash(bytes).into(),
+                }))
+                .await
+                .unwrap();
+            waiting.insert(i as u32);
+        }
+        self.data.flush().await.unwrap();
+        while !waiting.is_empty() {
+            match self.control.read_frame().await.unwrap() {
+                Frame::ChunkAck(ack) => {
+                    waiting.remove(&ack.file_id);
+                }
+                Frame::Ping(p) => self.control.send(&Frame::Pong(p)).await.unwrap(),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        for (i, (_, bytes)) in files.iter().enumerate() {
+            self.control
+                .send(&Frame::FileDone(FileDone {
+                    file_id: i as u32,
+                    blake3_full: blake3::hash(bytes).into(),
                 }))
                 .await
                 .unwrap();
         }
-        self.conn
-            .send(&Frame::FileDone(FileDone {
-                file_id,
-                blake3_full: blake3::hash(bytes).into(),
-            }))
-            .await
-            .unwrap();
+        loop {
+            match self.control.read_frame().await.unwrap() {
+                Frame::TransferComplete(c) => {
+                    assert_eq!(c.transfer_id, self.transfer_id);
+                    return;
+                }
+                Frame::Ping(p) => self.control.send(&Frame::Pong(p)).await.unwrap(),
+                Frame::ChunkAck(_) => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
     }
 }
 
@@ -656,11 +807,11 @@ impl RawSender {
 async fn hostile_file_names_stay_inside_the_download_folder() {
     let tmp = tempfile::tempdir().unwrap();
     let inbox = tmp.path().join("inbox");
-    let (addr, receiving) = spawn_receiver(
+    let mut receiver = TestReceiver::start(
         device("receiver"),
         TrustStore::in_memory(),
         &inbox,
-        Decision::Accept,
+        accept_all,
     )
     .await;
 
@@ -673,15 +824,12 @@ async fn hostile_file_names_stay_inside_the_download_folder() {
         ("SAME.txt", b"six"),
         ("..", b""),
     ];
-    let mut raw = RawSender::offer(addr, files).await;
-    for (i, (_, bytes)) in files.iter().enumerate() {
-        raw.send_file(i as u32, bytes, None).await;
-    }
+    let mut raw = RawSender::offer(receiver.addr, files).await;
+    raw.send_all(files).await;
     assert!(matches!(
-        raw.conn.read_frame().await.unwrap(),
-        Frame::TransferComplete(c) if c.transfer_id == raw.transfer_id
+        receiver.next_outcome().await,
+        Finished::Completed { .. }
     ));
-    receiving.await.unwrap().unwrap();
 
     assert_eq!(
         files_in(&inbox),
@@ -699,31 +847,108 @@ async fn hostile_file_names_stay_inside_the_download_folder() {
     assert_eq!(fs::read(inbox.join("SAME (1).txt")).unwrap(), b"six");
 }
 
+/// If a finished file doesn't match FILE_DONE's whole-file hash (data lost
+/// before reaching the disk, or the source changed), the receiver asks for
+/// its chunks again instead of failing the transfer.
 #[tokio::test]
-async fn corrupted_chunk_is_detected_and_nothing_is_kept() {
+async fn file_that_fails_its_final_check_is_requested_again() {
     let tmp = tempfile::tempdir().unwrap();
     let inbox = tmp.path().join("inbox");
-    let (addr, receiving) = spawn_receiver(
+    let mut receiver = TestReceiver::start(
         device("receiver"),
         TrustStore::in_memory(),
         &inbox,
-        Decision::Accept,
+        accept_all,
     )
     .await;
+    let content: &[u8] = b"the real content";
+    let mut raw = RawSender::offer(receiver.addr, &[("a.txt", content)]).await;
 
-    let mut raw = RawSender::offer(addr, &[("photo.jpg", b"original bytes")]).await;
-    raw.send_file(0, b"original bytes", Some([0xAA; 32])).await;
-
-    let err = receiving.await.unwrap().unwrap_err();
-    assert!(
-        matches!(&err, TransferError::HashMismatch { chunk: Some(0), .. }),
-        "{err}"
-    );
+    async fn send_chunk(raw: &mut RawSender, content: &[u8]) {
+        raw.data.write_data(0, 0, content).await.unwrap();
+        raw.data
+            .send(&Frame::ChunkHash(ChunkHash {
+                file_id: 0,
+                chunk_index: 0,
+                blake3: blake3::hash(content).into(),
+            }))
+            .await
+            .unwrap();
+    }
+    send_chunk(&mut raw, content).await;
     assert!(matches!(
-        raw.conn.read_frame().await.unwrap(),
-        Frame::Cancel(c) if c.reason.contains("hash mismatch")
+        next_control_frame(&mut raw).await,
+        Frame::ChunkAck(_)
     ));
-    assert!(files_in(&inbox).is_empty(), "{:?}", files_in(&inbox));
+    // Claim a different whole-file hash.
+    raw.control
+        .send(&Frame::FileDone(FileDone {
+            file_id: 0,
+            blake3_full: blake3::hash(b"something else").into(),
+        }))
+        .await
+        .unwrap();
+    assert!(matches!(
+        next_control_frame(&mut raw).await,
+        Frame::ChunkRetry(ChunkRetry {
+            file_id: 0,
+            chunk_index: 0
+        })
+    ));
+
+    // Send it again, correctly this time.
+    send_chunk(&mut raw, content).await;
+    assert!(matches!(
+        next_control_frame(&mut raw).await,
+        Frame::ChunkAck(_)
+    ));
+    raw.control
+        .send(&Frame::FileDone(FileDone {
+            file_id: 0,
+            blake3_full: blake3::hash(content).into(),
+        }))
+        .await
+        .unwrap();
+    assert!(matches!(
+        next_control_frame(&mut raw).await,
+        Frame::TransferComplete(_)
+    ));
+    assert!(matches!(
+        receiver.next_outcome().await,
+        Finished::Completed { .. }
+    ));
+    assert_eq!(fs::read(inbox.join("a.txt")).unwrap(), content);
+}
+
+#[tokio::test]
+async fn data_stream_with_a_wrong_session_token_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut receiver = TestReceiver::start(
+        device("receiver"),
+        TrustStore::in_memory(),
+        &tmp.path().join("in"),
+        accept_all,
+    )
+    .await;
+    let me = device("intruder");
+    let (mut data, _) = secure_connection(
+        TcpStream::connect(receiver.addr).await.unwrap(),
+        &me.identity,
+        Role::Initiator,
+    )
+    .await
+    .unwrap();
+    data.send(&Frame::StreamOpen(StreamOpen {
+        transfer_id: Uuid::new_v4(),
+        session_token: [9; 32],
+        stream_index: 0,
+    }))
+    .await
+    .unwrap();
+    assert!(receiver
+        .next_refusal()
+        .await
+        .contains("unknown session token"));
 }
 
 #[tokio::test]
@@ -734,6 +959,7 @@ async fn sending_a_folder_fails_before_connecting() {
         &device("sender"),
         &TrustStore::in_memory(),
         &[tmp.path().to_path_buf()],
+        &options(4),
         |_| {},
     )
     .await

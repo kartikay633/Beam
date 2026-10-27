@@ -134,6 +134,14 @@ fn frame() -> impl Strategy<Value = Frame> {
                 })
             })
             .boxed(),
+        (any::<u32>(), any::<u64>())
+            .prop_map(|(file_id, chunk_index)| {
+                Frame::ChunkRetry(ChunkRetry {
+                    file_id,
+                    chunk_index,
+                })
+            })
+            .boxed(),
         (any::<u32>(), hash())
             .prop_map(|(file_id, blake3_full)| {
                 Frame::FileDone(FileDone {

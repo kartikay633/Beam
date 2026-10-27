@@ -1,37 +1,43 @@
 # Beam wire protocol
 
-Status: **version 1.0, phase 2.** This covers a single TCP connection
-encrypted with Noise XX. Parallel data connections, CHUNK_ACK, keepalive
-timing and resume are specified in SPEC.md and will be documented here as
-they are built. Message bodies for those are already defined below, so the
-encoding won't change.
+Status: **version 1.0, phase 3.** This covers encrypted transfers over one
+control connection plus parallel data connections, with resume. Discovery
+(mDNS, BLE) comes in later phases.
 
-All integers on the wire are **big-endian**. "MB" means 1,000,000 bytes.
+All integers on the wire are **big-endian**. "MB" means 1,000,000 bytes;
+"MiB" means 1,048,576 bytes.
 
 ## Overview
 
-A transfer runs over one TCP connection, which the sender opens:
+A transfer uses one **control connection** and N **data connections**
+(default 4, at most 16), all opened by the sender to the receiver's port:
 
 ```
-Sender                                   Receiver
-──────                                   ────────
-Noise XX handshake (3 messages) ◄───────► both learn each other's static key
-── everything below is encrypted ──
-HELLO ──────────────────────────────────►
-      ◄────────────────────────────────── HELLO
-OFFER ──────────────────────────────────►
-                                          (asks the user)
-      ◄────────────────────────────────── ACCEPT   (or REJECT, then close)
-for each file:
-  for each 4 MiB chunk:
-    DATA, DATA, … ──────────────────────►  write to <name>.beam-part
-    CHUNK_HASH ─────────────────────────►  verify chunk
-  FILE_DONE ────────────────────────────►  verify file, rename to <name>
-      ◄────────────────────────────────── TRANSFER_COMPLETE
-close
+Sender                                      Receiver
+──────                                      ────────
+control connection:
+  Noise XX handshake (3 messages) ◄───────► both learn each other's static key
+  ── everything below is encrypted ──
+  HELLO ──────────────────────────────────►
+        ◄──────────────────────────────────  HELLO
+  OFFER ──────────────────────────────────►
+                                             (asks the user, unless trusted
+                                              with auto-accept, or a resume)
+        ◄──────────────────────────────────  ACCEPT (+ chunks already held)
+data connections 0..N-1, each:
+  Noise XX handshake (same static keys)
+  STREAM_OPEN (session token) ────────────►
+  for each chunk it takes from the queue:
+    DATA, DATA, … CHUNK_HASH ─────────────►  verify, then write to <name>.beam-part
+back on the control connection:
+        ◄──────────────────────────────────  CHUNK_ACK  (batched)
+        ◄──────────────────────────────────  CHUNK_RETRY (chunk failed its hash)
+  FILE_DONE (when all its chunks are acked) ► check whole file, rename to <name>
+        ◄──────────────────────────────────  TRANSFER_COMPLETE
+  PING / PONG both ways every 5 s
 ```
 
-The sender does not wait between files, so many small files are pipelined.
+The sender never waits between files, so many small files are pipelined.
 
 ## Device identity
 
@@ -45,7 +51,7 @@ Each device has a long-lived **static X25519 key pair**: its Noise static key.
 
 ## Transport and encryption
 
-The TCP byte stream is a sequence of **records**:
+Every TCP connection, control or data, is a sequence of **records**:
 
 ```
 record = len:u16 | payload[len]      (len ≤ 65,535)
@@ -53,13 +59,13 @@ record = len:u16 | payload[len]      (len ≤ 65,535)
 
 ### Handshake
 
-The connection starts with a Noise handshake:
+Each connection starts with its own Noise handshake:
 
 | Parameter | Value |
 |---|---|
 | Pattern | `Noise_XX_25519_ChaChaPoly_BLAKE2s` |
 | Prologue | the 6 ASCII bytes `beam/1` |
-| Initiator | the side that opened the TCP connection |
+| Initiator | the side that opened the TCP connection (always the sender) |
 | Payloads | empty in all three messages |
 
 Each of the three XX messages (`→ e`, `← e, ee, s, es`, `→ s, se`) is sent as
@@ -70,18 +76,52 @@ disconnected.
 
 After the handshake, every record payload is **one Noise transport message**
 (ChaCha20-Poly1305, 16-byte tag), so record plaintext is at most
-**65,519 bytes**. A record that fails authentication ends the connection.
+**65,519 bytes**. Each direction keeps its own nonce counter, starting at 0
+and increasing by one per record. A record that fails authentication ends the
+connection.
 
-### Peer verification
+### What a new connection is
 
-After the HELLO exchange (below), each side checks the other before going on:
+The first frame after the handshake decides it:
 
-1. **Id matches key:** `HELLO.device_id` must equal the id derived from the
+- **HELLO**: a control connection. The receiver must see it within
+  **10 seconds**.
+- **STREAM_OPEN**: a data connection.
+- Anything else: the receiver closes the connection.
+
+### Peer verification (control connections)
+
+After the HELLO exchange, each side checks the other before going on:
+
+1. **Versions:** the major versions must match.
+2. **Id matches key:** `HELLO.device_id` must equal the id derived from the
    static key the handshake proved. A peer can't claim another device's id.
-2. **Trusted key matches:** if that id is in the local trust store, the proven
+3. **Trusted key matches:** if that id is in the local trust store, the proven
    key must equal the stored key byte for byte.
 
-If either check fails, the connection is closed without further messages.
+If any check fails, the connection is closed without further messages.
+
+### Binding data connections to the session
+
+Both sides derive a **session token** from the control connection's
+handshake hash:
+
+```
+session_token = BLAKE3-derive_key(context = "beam 2026-10-27 session token v1",
+                                  material = control handshake hash)   (32 bytes)
+```
+
+A data connection is accepted only if all three hold:
+
+- Its STREAM_OPEN carries a `session_token` of a running session.
+- Its `transfer_id` is that session's transfer.
+- Its own handshake proved the **same sender static key** as the control
+  connection.
+
+The sender likewise checks that each data connection reaches the same
+receiver key. The token routes the connection to its session, but it is not
+a secret (handshake hashes can be computed from the visible handshake). The
+key check is what authenticates.
 
 ### Verification code
 
@@ -89,7 +129,7 @@ Both sides show a 6-digit code so users can spot a man-in-the-middle:
 
 ```
 key  = BLAKE3-derive_key(context = "beam 2026-10-27 verification code v1",
-                         material = Noise handshake hash (32 bytes))
+                         material = control handshake hash)
 code = little_endian_u64(key[0..8]) mod 1,000,000, written as 6 digits with leading zeros
 ```
 
@@ -106,47 +146,127 @@ frame_message = frame_len:u32 | frame[frame_len]
 frame         = type:u8 | body
 ```
 
-- `frame_message` is split into records of at most 65,519 bytes. The first
-  record of a frame must contain at least the 4-byte `frame_len`.
+- `frame_message` is split into records of at most 65,519 bytes of
+  plaintext. The first record of a frame contains at least the 4-byte
+  `frame_len`.
 - A record never contains bytes from two different frames.
-- `frame_len` must be at most **4 MiB** (4,194,304). A receiver closes the
-  connection if it's larger, before allocating anything.
+- `frame_len` must be at most **4 MiB**; otherwise the connection is closed
+  before anything is allocated.
 - Control bodies are CBOR (RFC 8949). DATA has a fixed binary header.
-- Small frames (all control frames in practice, and every DATA frame) fit in
-  one record. Only very large OFFER or CLIPBOARD frames span several.
+- Every DATA frame fits in one record; only very large OFFER or CLIPBOARD
+  frames span several.
 
 ### CBOR conventions
 
-- Every control body is a CBOR **map with text-string keys**, one key per field
-  listed below.
+- Every control body is a CBOR **map with text-string keys**, one key per
+  field listed below.
 - Decoders **ignore unknown keys**, so a minor version can add fields.
 - The body must be exactly one CBOR item; trailing bytes are an error.
-- `uuid` = 16-byte byte string. `hash` = 32-byte byte string (BLAKE3).
-  `device_id` = 8-byte byte string. Other `bytes` fields are byte strings.
+- Byte strings: `uuid` = 16 bytes, `hash` = 32 bytes (BLAKE3),
+  `device_id` = 8 bytes, `token` = 32 bytes.
 - Unsigned integers are `uint`; `modified_unix` may be negative (`int`).
 
-Wire example: `PING {nonce: 1}` is the frame
-`0C A1 65 6E 6F 6E 63 65 01` (type 0x0C, map(1), text(5) "nonce", 1).
-With its frame length, the record plaintext is 13 bytes:
+Wire example: `PING {nonce: 1}` is the frame `0C A1 65 6E 6F 6E 63 65 01`
+(type 0x0C, map(1), text(5) "nonce", 1). With its frame length the record
+plaintext is 13 bytes:
 
 ```
 00 00 00 09      frame_len = 9
 0C A1 65 6E 6F 6E 63 65 01
 ```
 
-Encrypted, that becomes a 29-byte Noise message (13 bytes + 16-byte tag), so
-the record on the wire is `00 1D` followed by 29 bytes of ciphertext.
+Encrypted, that becomes a 29-byte Noise message (13 + 16-byte tag), so the
+record is `00 1D` followed by 29 bytes of ciphertext.
+
+## Chunks
+
+Files are split into **chunks of 4 MiB** (the last chunk may be shorter; an
+empty file has none). Chunk `i` covers bytes
+`[i × 4 MiB, min((i+1) × 4 MiB, size))`. The chunk is the unit of hashing,
+scheduling, acknowledgement and resume.
+
+- **One chunk, one stream:** a chunk is sent entirely on one data connection
+  as consecutive DATA frames, in order, followed by its CHUNK_HASH.
+- **Work stealing:** each data connection takes the next unsent chunk when
+  it's free. Chunks of different files interleave freely across connections.
+- **Verify before writing:** the receiver buffers a chunk, checks it against
+  CHUNK_HASH, and only then writes it to `<final name>.beam-part` (at its
+  offset; the part file is preallocated to the full size).
+
+## Flow control and acknowledgements
+
+- The sender keeps at most **16 MiB of unacknowledged data per data
+  connection**. A CHUNK_ACK frees the space of the chunks it lists.
+- The receiver acknowledges a chunk once it is verified *and written*. It
+  sends CHUNK_ACKs when 4 MiB or 64 chunks are pending, and at least every
+  **250 ms**.
+- The receiver writes through a short queue (4 chunks). When the disk is
+  slower than the network, data connections stop being read and TCP slows the
+  sender down. Memory stays flat.
+
+## Keepalive
+
+On the control connection, each side sends **PING every 5 s** and answers
+every PING with a PONG echoing its nonce. A control connection that receives
+nothing for **15 s** is treated as dead. Data connections carry no
+keepalive; their session ends with its control connection.
+
+## Resume
+
+### Receiver side
+
+When it accepts a transfer, the receiver writes a **progress file**:
+
+```
+<download dir>/.beam-partial/<transfer_id>.json
+```
+
+It holds the sender's public key, and for each file: the offered fingerprint
+(name, size, modified time), the reserved final name, a bitmap of verified
+chunks, and the whole-file hash once the file is finished.
+
+- The progress file is saved at least **every 2 s**.
+- Before each save, the files with partly written data are synced to disk, so
+  the bitmap never claims chunks that aren't stored.
+- It's deleted when the transfer completes.
+- Unfinished transfers are kept for **24 hours**, then their part files and
+  progress file are removed.
+
+### Sender side
+
+If the connection drops after the receiver accepted (network error, closed
+connection, keepalive timeout), the sender:
+
+1. Reconnects to the same address, waiting 100 ms, 200 ms, 400 ms, 800 ms,
+   then 1.6 s between attempts, for up to **60 s** after the drop.
+2. Refuses to continue if the receiver now has a different static key.
+3. Sends the **same OFFER** (same `transfer_id`) again.
+
+### Matching a resumed offer
+
+The receiver resumes, without asking the user again, when a progress file
+exists for that `transfer_id`, the sender key matches, and every offered
+file's fingerprint matches (same file ids, names, sizes and modified times, in
+the same order).
+
+- Its ACCEPT then lists the verified chunks in `have`, and the sender sends
+  only the missing ones.
+- If an older session of the same transfer is still running on the receiver
+  (it hasn't noticed the drop yet), the new session tells it to stop and waits
+  until it has saved its progress.
+- A progress file that doesn't match is discarded, and the offer is treated as
+  new.
 
 ## Messages
 
 Examples use CBOR diagnostic notation (RFC 8949 section 8). `h'…'` is a byte
 string.
 
-### 0x01 HELLO (both directions)
+### 0x01 HELLO (both directions, control)
 
-The first frame each side sends. The sender sends it first; the receiver
-replies with its own HELLO **before** checking versions, so both sides can
-report a mismatch.
+The first frame on a control connection. The sender sends it first; the
+receiver replies with its own HELLO **before** checking, so both sides can
+report a version mismatch.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -154,7 +274,7 @@ report a mismatch.
 | `device_id` | bytes(8) | First 8 bytes of SHA-256 of the sender's static key. Must match the key proven in the handshake. |
 | `name` | text | Human-readable device name. |
 | `type` | text | `"phone"` or `"laptop"`. |
-| `capabilities` | array of text | Optional features. Empty in phase 1. |
+| `capabilities` | array of text | Optional features. Empty in version 1.0. |
 
 ```
 {"version": {"major": 1, "minor": 0},
@@ -162,15 +282,11 @@ report a mismatch.
  "name": "Kartikay's Pixel", "type": "phone", "capabilities": []}
 ```
 
-If the major versions differ, both sides close the connection and show an
-error such as "peer speaks protocol 2.0, but this device speaks 1.0". Then
-each side runs the [peer verification](#peer-verification) checks.
-
-### 0x02 OFFER (sender → receiver)
+### 0x02 OFFER (sender → receiver, control)
 
 | Field | Type | Meaning |
 |---|---|---|
-| `transfer_id` | uuid | Random v4 UUID chosen by the sender. |
+| `transfer_id` | uuid | Random v4 UUID chosen by the sender; reused when resuming. |
 | `files` | array of file entries | See below. |
 | `total_size` | uint | Sum of all `size` fields. |
 
@@ -195,7 +311,8 @@ The receiver answers REJECT (and closes) if the offer:
 - has no files, or more than **10,000**;
 - repeats a `file_id`;
 - has a `name` longer than **1,024 bytes**;
-- has a `total_size` that doesn't equal the sum of the sizes.
+- has a `total_size` that doesn't equal the sum of the sizes;
+- uses a `transfer_id` that is currently running for a different sender.
 
 Names are then sanitized before they are shown or used:
 - Only the last path component is kept.
@@ -209,21 +326,22 @@ Names are then sanitized before they are shown or used:
 If the name is already taken, the file is saved as `name (1).ext`,
 `name (2).ext`, and so on. See `core/src/sanitize.rs`.
 
-### 0x03 ACCEPT (receiver → sender)
+### 0x03 ACCEPT (receiver → sender, control)
 
 | Field | Type | Meaning |
 |---|---|---|
 | `transfer_id` | uuid | From the OFFER. |
-| `have` | array of `{file_id: uint, chunk_bitmap: bytes}` | Chunks already verified, for resume. Empty in phase 1. |
+| `have` | array of `{file_id: uint, chunk_bitmap: bytes}` | Chunks the receiver already holds (resume). Files with nothing are left out. |
 
 In `chunk_bitmap`, chunk `i` is bit `i % 8` (least significant first) of byte
-`i / 8`. A set bit means the receiver already has that chunk.
+`i / 8`. A set bit means the chunk is verified and stored. The bitmap has
+exactly `ceil(chunks / 8)` bytes, and bits past the last chunk are zero.
 
 ```
-{"transfer_id": h'5f0c…', "have": []}
+{"transfer_id": h'5f0c…', "have": [{"file_id": 0, "chunk_bitmap": h'ff0f'}]}
 ```
 
-### 0x04 REJECT (receiver → sender)
+### 0x04 REJECT (receiver → sender, control)
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -236,21 +354,22 @@ In `chunk_bitmap`, chunk `i` is bit `i % 8` (least significant first) of byte
 
 After REJECT the receiver closes the connection.
 
-### 0x05 STREAM_OPEN (sender → receiver, on a data connection)
-
-Defined now, used from phase 3.
+### 0x05 STREAM_OPEN (sender → receiver, first frame of a data connection)
 
 | Field | Type | Meaning |
 |---|---|---|
 | `transfer_id` | uuid | The transfer this data connection belongs to. |
-| `session_token` | bytes(32) | Derived from the control connection's Noise handshake hash (exact derivation defined in phase 3). |
-| `stream_index` | uint (u16) | 0-based index of this data connection. |
+| `session_token` | token | Derived from the control handshake hash (see above). |
+| `stream_index` | uint (u16) | 0-based index of this data connection (informational). |
 
 ```
 {"transfer_id": h'5f0c…', "session_token": h'9a41…(32 bytes)', "stream_index": 2}
 ```
 
-### 0x06 DATA (sender → receiver)
+A data connection that doesn't match a running session is closed. The
+receiver never writes on data connections.
+
+### 0x06 DATA (sender → receiver, data connection)
 
 Binary, not CBOR:
 
@@ -258,12 +377,12 @@ Binary, not CBOR:
 type=0x06 | file_id:u32 | offset:u64 | len:u32 | bytes[len]
 ```
 
-- `len` must equal the number of bytes that follow, or the frame is invalid.
+- `len` must equal the number of bytes that follow, and must not be 0.
 - The sender uses up to **64,512 bytes** (63 KiB) per DATA frame, so a DATA
   frame always fits in one record.
-- A DATA frame never crosses a 4 MiB chunk boundary.
-- Phase 1: DATA for a file arrives in order (`offset` equals the bytes
-  received so far). Parallel streams in phase 3 relax this.
+- The first DATA frame of a chunk starts at the chunk's first byte. Each
+  following frame continues exactly where the previous one ended, and no
+  frame crosses the chunk's end.
 
 Example: 3 bytes `abc` at offset 1024 of file 7:
 
@@ -271,10 +390,9 @@ Example: 3 bytes `abc` at offset 1024 of file 7:
 06 00000007 0000000000000400 00000003 616263
 ```
 
-### 0x07 CHUNK_HASH (sender → receiver)
+### 0x07 CHUNK_HASH (sender → receiver, data connection)
 
-Sent right after the last DATA frame of each 4 MiB chunk (the last chunk of a
-file may be shorter). Chunk `i` covers bytes `[i × 4 MiB, min((i+1) × 4 MiB, size))`.
+Sent right after the last DATA frame of each chunk, on the same connection.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -286,26 +404,46 @@ file may be shorter). Chunk `i` covers bytes `[i × 4 MiB, min((i+1) × 4 MiB, s
 {"file_id": 0, "chunk_index": 0, "blake3": h'af1349b9…(32 bytes)'}
 ```
 
-The receiver compares this with the hash of the bytes it received. Phase 1:
-a mismatch cancels the transfer. Phase 3: the chunk is requested again.
+If the chunk matches, the receiver writes it and later acknowledges it. If it
+doesn't, the receiver discards it and sends CHUNK_RETRY.
 
-### 0x08 CHUNK_ACK (receiver → sender)
-
-Defined now, used from phase 3. Batched about every 250 ms.
+### 0x08 CHUNK_ACK (receiver → sender, control)
 
 | Field | Type | Meaning |
 |---|---|---|
 | `file_id` | uint | |
-| `chunk_indices` | array of uint | Chunks verified and persisted since the last ack. |
+| `chunk_indices` | array of uint | Chunks verified and written since the last ack. |
 
 ```
 {"file_id": 0, "chunk_indices": [12, 13, 14]}
 ```
 
-### 0x09 FILE_DONE (sender → receiver)
+### 0x0E CHUNK_RETRY (receiver → sender, control)
 
-Sent after the last CHUNK_HASH of a file. An empty file has no chunks, so it
-gets only FILE_DONE.
+Not in SPEC.md's original table; added because SPEC.md 7.3 says a failed
+chunk is "re-requested" (see DECISIONS.md).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `file_id` | uint | |
+| `chunk_index` | uint | The chunk to send again. |
+
+```
+{"file_id": 0, "chunk_index": 7}
+```
+
+Sent when:
+- A chunk fails its CHUNK_HASH check.
+- A finished file fails its whole-file check (see FILE_DONE). In that case
+  the receiver asks for every chunk of the file, even chunks it had already
+  acknowledged. The sender then treats them as unacknowledged again.
+
+A chunk asked for **5 times** ends the transfer with an error.
+
+### 0x09 FILE_DONE (sender → receiver, control)
+
+Sent once all of a file's chunks have been acknowledged. An empty file has no
+chunks, so it gets only FILE_DONE.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -316,29 +454,33 @@ gets only FILE_DONE.
 {"file_id": 0, "blake3_full": h'af1349b9…(32 bytes)'}
 ```
 
-The receiver checks:
-1. Every chunk was received and verified.
-2. The full-file hash matches.
+The receiver checks that every chunk is verified, then compares the whole-file
+hash:
+- **One-chunk files:** the verified chunk hash *is* the whole-file hash, so
+  it's compared directly.
+- **Other files:** the part file is read back from disk and hashed.
 
-It then renames `<name>.beam-part` to `<name>`. If a file with that name
-appeared in the meantime, it saves as `<name> (n)` instead.
+On a match, the receiver renames `<name>.beam-part` to `<name>` (choosing
+`<name> (n)` if that name appeared in the meantime). On a mismatch, it sends
+CHUNK_RETRY for every chunk of the file. FILE_DONE for a file that is already
+finished (from an earlier session) is answered by nothing if the hash matches.
 
-### 0x0A TRANSFER_COMPLETE (receiver → sender)
+### 0x0A TRANSFER_COMPLETE (receiver → sender, control)
 
 Sent when every file in the OFFER is verified and saved.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `transfer_id` | uuid | |
-| `stats` | map | `{bytes: uint, files: uint, duration_ms: uint}`, measured by the receiver from ACCEPT to completion. More fields (peak speed, link type, stream count, retries) come in later phases. |
+| `stats` | map | `{bytes: uint, files: uint, duration_ms: uint}`, measured by the receiver for this session. |
 
 ```
 {"transfer_id": h'5f0c…', "stats": {"bytes": 2311042, "files": 1, "duration_ms": 412}}
 ```
 
-Both sides then close the connection.
+Both sides then close all connections.
 
-### 0x0B CANCEL (both directions)
+### 0x0B CANCEL (both directions, control)
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -346,14 +488,14 @@ Both sides then close the connection.
 | `reason` | text | Human-readable reason. |
 
 ```
-{"transfer_id": h'5f0c…', "reason": "hash mismatch in IMG_0042.jpg (chunk 0)"}
+{"transfer_id": h'5f0c…', "reason": "protocol violation: DATA for unknown file_id 9"}
 ```
 
-When a receiver fails a transfer (a protocol violation, a hash mismatch or a
-disk error), it sends CANCEL with the reason, deletes the `.beam-part` files
-and closes. (From phase 3, partial files are kept for resume instead.)
+A CANCEL (sent or received) ends the transfer for good. The receiver deletes
+the part files of unfinished files and the progress file. Files already
+finished are kept.
 
-### 0x0C PING / 0x0D PONG (both directions)
+### 0x0C PING / 0x0D PONG (both directions, control)
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -362,9 +504,6 @@ and closes. (From phase 3, partial files are kept for resume instead.)
 ```
 {"nonce": 1}
 ```
-
-Phase 1 answers PING with PONG during a transfer. The 5 s interval and 15 s
-timeout come in phase 3.
 
 ### 0x10 CLIPBOARD (both directions)
 
@@ -381,11 +520,14 @@ Defined now, used from phase 9.
 
 ## Errors and closing
 
-- Unknown frame types, malformed CBOR, a bad DATA length, an oversized frame
-  or a frame that arrives at the wrong time are protocol violations. The
-  receiver sends CANCEL with a reason (when it can) and closes.
-- A clean TCP close between frames ends the session. A close in the middle of
-  a frame is an error.
+- Protocol violations end the transfer: unknown frame types, malformed CBOR,
+  a bad DATA length, an oversized frame, a frame on the wrong kind of
+  connection or at the wrong time, or DATA that doesn't continue its chunk.
+  The receiver sends CANCEL with a reason (when it can) and closes.
+- A dropped connection (network error, clean close in the middle of a
+  transfer, keepalive timeout) is **not** an error by itself. The receiver
+  keeps its progress, and the sender reconnects and resumes as described
+  above.
 
 ## Versioning
 

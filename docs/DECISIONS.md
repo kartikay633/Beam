@@ -220,3 +220,187 @@ quick remove-then-add could be missed).
 
 The phase 1 note "the device id is random per run" no longer applies. It is
 now derived from the persisted static key, as described above.
+
+## 2026-10-27 — Phase 3 transfer engine: control + data connections
+
+**What:**
+- One control connection carries HELLO, OFFER, ACCEPT, CHUNK_ACK,
+  CHUNK_RETRY, FILE_DONE, PING and TRANSFER_COMPLETE.
+- N data connections (default 4, up to 16) carry only DATA and CHUNK_HASH.
+- Each data connection runs its own Noise handshake and must prove the *same
+  static key* as the control connection. Its STREAM_OPEN carries a session
+  token derived from the control handshake hash.
+- A chunk (4 MiB) always travels whole on one data connection. Each stream
+  takes the next chunk from a shared queue when it's free (work stealing).
+
+**Why:**
+- A single TCP connection rarely fills a fast link: one congestion window, and
+  one core doing encryption. Parallel connections spread both.
+- Keeping each chunk on one stream means the receiver can verify a chunk with
+  no cross-stream reassembly.
+- Data connections authenticate with their own handshake, so the session
+  token only has to *route* them, not prove anything. That matters because
+  the token is derived from the handshake hash, which an eavesdropper can
+  compute too.
+
+**Alternatives:**
+- Multiplexing streams over one connection (QUIC-style): it doesn't get
+  around a single TCP connection's limits.
+- Striping each chunk across all streams: needs reordering and only verifies
+  once every stream has delivered.
+
+## 2026-10-27 — Snow's stateless transport so connections can be split
+
+**What:** After the handshake, `into_stateless_transport_mode()` produces a
+state shared by a sealer and an opener, each with its own nonce counter. A
+`Connection` splits into a `FrameReader` and a `FrameWriter` used by
+different tasks.
+
+**Why:** The control connection must read acks while the session writes
+FILE_DONE and PINGs. Reading a frame isn't cancel-safe, so the reader lives
+in its own task. Snow's regular `TransportState` needs `&mut` for both
+directions, so it can't be shared that way.
+
+## 2026-10-27 — New message CHUNK_RETRY (0x0E) (spec gap)
+
+**What:** The receiver sends `CHUNK_RETRY {file_id, chunk_index}` on the
+control connection when a chunk fails its CHUNK_HASH, or when a finished file
+fails its whole-file check. The sender puts the chunk back at the front of
+the queue. Five requests for the same chunk end the transfer.
+
+**Why:** SPEC.md 7.3 says a mismatch "means re-requesting that chunk", but the
+message table in 7.2 has no message for it.
+
+**Alternatives:**
+- Drop the data connection and let resume handle it: it works, but costs a
+  reconnect and throws away other in-flight chunks.
+- An optional field on CHUNK_ACK: it mixes positive and negative acks in one
+  message.
+
+## 2026-10-27 — One progress file per transfer, not one per file (deviation from SPEC.md 7.3)
+
+**What:** SPEC.md describes a `name.beam-part.json` next to each part file.
+Instead there is one manifest per transfer,
+`<download dir>/.beam-partial/<transfer_id>.json`, holding every file's
+fingerprint, reserved name, chunk bitmap and finished hash. It's written at
+ACCEPT time and then at most every 2 s.
+
+**Why:**
+- A 1,000-file transfer would otherwise create and rewrite 1,000 extra JSON
+  files.
+- Writing the manifest at ACCEPT means "the user accepted this transfer"
+  survives a drop that happens before any chunk lands, so a reconnect never
+  asks again.
+- One atomic rename updates everything at once.
+- Part files stay next to their final names, as in the spec.
+
+## 2026-10-27 — Verify before writing; bounded queues keep memory flat
+
+**What:**
+- A data stream buffers one chunk (at most 4 MiB), hashes it as it arrives,
+  and hands it to the disk writer only if CHUNK_HASH matches.
+- The writer is one blocking thread behind a 4-chunk channel and uses
+  positional writes into preallocated part files.
+- The sender reads one chunk per stream and has a 16 MiB unacknowledged
+  window per stream.
+
+**Why:** Nothing unverified ever touches the disk, and a bitmap bit always
+means "verified and written". Memory is bounded by streams × 4 MiB plus the
+4-chunk queue on each side, whatever the file size. Peak memory is measured
+by the benchmark runner (`bench/raw_results.csv`).
+
+## 2026-10-27 — Durability: sync partial files at checkpoints, not every file
+
+**What:**
+- Before each progress-file save, the writer fsyncs the part files that are
+  still partially written.
+- A file whose bytes are all written is closed without an fsync. It is then
+  checked against FILE_DONE's whole-file hash and renamed.
+- If that final check fails (for example data lost in a power cut before it
+  reached the disk), the receiver re-requests the file's chunks with
+  CHUNK_RETRY instead of failing.
+
+**Why:** An fsync per small file made 1,000 × 10 KB files take seconds (see
+LEARNINGS.md). Resume needs the *claims* in the progress file to be true, and
+syncing before each save guarantees that for big files, where re-sending is
+expensive. Small files are cheap to re-send, and the end-to-end hash check
+catches anything lost.
+
+**Alternatives:**
+- Fsync every file before renaming: safest, but far too slow on Windows.
+- No syncing at all: a power cut could make a big file's progress file claim
+  chunks that are gone, and the final check would then re-request the whole
+  file.
+
+## 2026-10-27 — Whole-file hashes: no extra read for one-chunk files
+
+**What:**
+- For a file of one chunk, the chunk hash *is* the whole-file hash.
+  - The sender takes it from the stream that sent the chunk.
+  - The receiver takes it from the verified chunk.
+- Multi-chunk files are hashed once more from disk: in the background on the
+  sender, and after the last chunk on the receiver (so the receiver also
+  verifies what's actually on disk). Both use 4 MiB blocks and all cores
+  (`update_rayon`) rather than memory-mapping.
+
+**Why:**
+- An extra open and read per small file doubled the per-file cost.
+- Memory-mapping a 1 GB file counted 950 MB toward the process's resident
+  memory (see LEARNINGS.md).
+
+## 2026-10-27 — CHUNK_ACK batching thresholds
+
+**What:** The receiver flushes CHUNK_ACKs when 4 MiB of chunks or 64 chunks
+are pending, and otherwise every 250 ms.
+
+**Why:** With only a timer, one stream could have at most its 16 MiB window
+in flight per 250 ms, which caps it at 64 MB/s. Acking every 4 MiB keeps the
+window open, and the 64-chunk limit stops thousands of tiny files from
+producing one ack each.
+
+## 2026-10-27 — The receiver is a concurrent server; reconnects take over
+
+**What:**
+- `Receiver::run(handler)` serves any number of connections; the front-end
+  implements `ReceiveHandler` (`decide`, `progress`, `finished`,
+  `connection_refused`), which also suits the coming FFI callback interface.
+- If a resumed offer arrives while the old session of the same transfer is
+  still running (it hasn't noticed the drop), the new session cancels the old
+  one and waits until it has saved its progress.
+
+**Why:**
+- Data connections arrive on the same port while a transfer runs, so one
+  transfer at a time can't work.
+- Without takeover, a quick reconnect would race the old session over the same
+  part files.
+
+## 2026-10-27 — Reconnect policy
+
+**What:** The sender retries only after the receiver has accepted once, and
+only for network-level failures (I/O error, closed connection, timeout).
+
+- **Backoff:** 100 ms, 200 ms, 400 ms, 800 ms, then 1.6 s.
+- **Time limit:** up to 60 s after the last drop.
+- **Same receiver:** the receiver's key is pinned from the first session, and
+  a reconnect that reaches a different key is refused.
+
+**Why:**
+- Retrying a rejection, a protocol error or an impersonation would be wrong.
+- Retrying before acceptance would show the user a second prompt.
+- Pinning the key stops a man-in-the-middle from slipping in during a
+  reconnect.
+
+## 2026-10-27 — Benchmarks in Python with a venv on D:
+
+**What:**
+- `bench/generate.py`, `bench/run.py` and `bench/chart.py`, with
+  matplotlib and psutil installed in a virtual environment.
+- On this machine, the venv, test data and scratch files all live on D:. The
+  scripts take `--data-dir` and `--work-dir`.
+- `run.py` drives the real `beam-cli` (release build) with `--json` output.
+  It records every run in `raw_results.csv` and medians in `results.csv`,
+  including peak memory of both processes.
+
+**Why:** It measures the shipped binary end to end, and Python is the quickest
+way to make charts. Loopback numbers measure the software (crypto, hashing,
+disk), not the network; LAN numbers need a second device.

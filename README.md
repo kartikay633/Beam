@@ -15,7 +15,7 @@ sharing that works even with no shared Wi-Fi network and no internet.
 | `cli/` | `beam-cli`: send / receive / discover from a terminal |
 | `desktop/` | Tauri v2 desktop app (later phase) |
 | `android/` | Android app, Kotlin + Jetpack Compose (later phase) |
-| `bench/` | Benchmark scripts and results (later phase) |
+| `bench/` | Benchmark scripts, results and charts |
 | `docs/` | Spec, protocol, design decisions, learnings |
 
 ## Building
@@ -27,10 +27,13 @@ also install the Visual Studio C++ Build Tools.
 cargo test --workspace
 ```
 
-## Trying it (phase 2: encrypted, CLI only)
+## Trying it (phase 3: CLI only, same network)
 
 Every connection is end-to-end encrypted with Noise XX. On first run each
 device creates a key pair in its config folder (`%APPDATA%\Beam` on Windows).
+Files are sent over 4 parallel encrypted connections by default
+(`--streams N` to change it). If the connection drops, the sender reconnects
+for up to 60 s and resumes where it left off.
 
 In one terminal, start a receiver:
 
@@ -60,6 +63,7 @@ Other commands:
 | Command | What it does |
 |---|---|
 | `beam-cli identity` | Show this device's id (fingerprint) and public key |
+| `beam-cli trust add <public key> --name N [--auto-accept]` | Trust a device by its public key |
 | `beam-cli trust list` | List trusted devices |
 | `beam-cli trust remove <id>` | Stop trusting a device (takes effect immediately, even for a running receiver) |
 
@@ -86,3 +90,16 @@ format is described in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 The test `nothing_readable_crosses_the_wire` in `core/tests/transfer.rs`
 checks the same thing automatically, using a recording proxy.
+
+## Performance
+
+Loopback, release build, median of 5 runs (this measures the software, not a
+network). See [bench/](bench/README.md) for the method and the raw data.
+
+![Beam loopback benchmark](bench/results_loopback.png)
+
+Memory stays flat whatever the file size: peak memory per process is in
+`bench/raw_results.csv`. Reliability is tested by
+`chaos_fifty_disconnects_during_a_1_gb_transfer`, which cuts every connection
+50 times during a 1 GB transfer and checks that the file still arrives
+identical.

@@ -1,18 +1,20 @@
 //! beam-cli: send and receive files from a terminal.
 
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use beam_core::{
-    send_to, Decision, DeviceId, DeviceType, Identity, IncomingOffer, LocalDevice, PeerInfo,
-    Progress, ReceiveOutcome, Receiver, ReceiverConfig, SendEvent, SendOutcome, TrustStore,
-    TrustedDevice,
+    send_to, BoxFuture, Decision, DeviceId, DeviceType, Identity, IncomingOffer, LocalDevice,
+    PeerInfo, Progress, ReceiveHandler, ReceiveOutcome, Receiver, ReceiverConfig, SendEvent,
+    SendOptions, SendOutcome, TransferError, TransferSummary, TrustStore, TrustedDevice,
 };
 use clap::{Parser, Subcommand};
+use uuid::Uuid;
 
 const IDENTITY_FILE: &str = "identity.json";
 const TRUST_FILE: &str = "trusted_devices.json";
@@ -55,6 +57,12 @@ enum Command {
         /// Receiver address, e.g. 127.0.0.1:9000.
         #[arg(long)]
         to: SocketAddr,
+        /// Parallel data connections.
+        #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u16).range(1..=16))]
+        streams: u16,
+        /// Print the final statistics as one line of JSON on stdout.
+        #[arg(long)]
+        json: bool,
         /// Files to send.
         #[arg(required = true)]
         files: Vec<PathBuf>,
@@ -72,6 +80,17 @@ enum Command {
 enum TrustCommand {
     /// List trusted devices.
     List,
+    /// Trust a device by its public key (as shown by `beam-cli identity`).
+    Add {
+        /// The device's 64-hex-digit public key.
+        public_key: String,
+        /// Name to remember it by.
+        #[arg(long)]
+        name: String,
+        /// Accept its transfers without asking.
+        #[arg(long)]
+        auto_accept: bool,
+    },
     /// Stop trusting a device.
     Remove {
         /// Device id, e.g. 0123-4567-89ab-cdef.
@@ -106,9 +125,18 @@ async fn main() -> Result<()> {
             let device = local_device(&config_dir, cli.name)?;
             receive(device, trust, SocketAddr::new(bind, port), dir).await
         }
-        Command::Send { to, files } => {
+        Command::Send {
+            to,
+            streams,
+            json,
+            files,
+        } => {
             let device = local_device(&config_dir, cli.name)?;
-            send(device, trust, to, files).await
+            let options = SendOptions {
+                streams: streams as usize,
+                ..SendOptions::default()
+            };
+            send(device, trust, to, files, options, json).await
         }
         Command::Identity => {
             let device = local_device(&config_dir, cli.name)?;
@@ -155,6 +183,19 @@ fn trust_command(trust: &TrustStore, command: TrustCommand) -> Result<()> {
             }
             Ok(())
         }
+        TrustCommand::Add {
+            public_key,
+            name,
+            auto_accept,
+        } => {
+            let key: [u8; 32] = parse_hex(&public_key)
+                .and_then(|bytes| bytes.try_into().ok())
+                .context("a public key is 64 hex digits (see `beam-cli identity`)")?;
+            let device = TrustedDevice::new(name, key, auto_accept);
+            println!("Trusted \"{}\" ({}).", device.name, device.device_id);
+            trust.upsert(device)?;
+            Ok(())
+        }
         TrustCommand::Remove { id } => {
             if trust.remove(&id)? {
                 println!("Removed {id} from trusted devices.");
@@ -189,43 +230,95 @@ async fn receive(
         dir.display()
     );
     println!("Press Ctrl+C to stop.");
+    receiver
+        .run(CliHandler {
+            trust,
+            prompt: Arc::new(tokio::sync::Mutex::new(())),
+            printers: Mutex::default(),
+        })
+        .await?;
+    Ok(())
+}
 
-    loop {
-        let mut printer = ProgressPrinter::new("Receiving");
-        let trust = trust.clone();
-        let result = receiver
-            .accept_transfer(|offer| ask_to_accept(offer, trust), |p| printer.update(p))
-            .await;
-        printer.finish();
+struct CliHandler {
+    trust: TrustStore,
+    /// One question on the terminal at a time.
+    prompt: Arc<tokio::sync::Mutex<()>>,
+    printers: Mutex<HashMap<Uuid, ProgressPrinter>>,
+}
+
+impl ReceiveHandler for CliHandler {
+    fn decide(&self, offer: IncomingOffer) -> BoxFuture<Decision> {
+        let (trust, prompt) = (self.trust.clone(), self.prompt.clone());
+        Box::pin(async move {
+            let _turn = prompt.lock().await;
+            ask_to_accept(offer, trust).await
+        })
+    }
+
+    fn progress(&self, transfer_id: Uuid, progress: Progress) {
+        self.printers
+            .lock()
+            .unwrap()
+            .entry(transfer_id)
+            .or_insert_with(|| ProgressPrinter::new("Receiving"))
+            .update(progress);
+    }
+
+    fn finished(&self, transfer_id: Uuid, result: &Result<ReceiveOutcome, TransferError>) {
+        if let Some(mut printer) = self.printers.lock().unwrap().remove(&transfer_id) {
+            printer.finish();
+        }
         match result {
             Ok(ReceiveOutcome::Completed {
                 from,
                 auto_accepted,
+                resumed,
                 files,
                 summary,
             }) => {
-                if auto_accepted {
+                if *resumed {
+                    println!("Resumed an interrupted transfer from \"{}\".", from.name());
+                } else if *auto_accepted {
                     println!(
                         "Accepted automatically: \"{}\" is trusted with auto-accept.",
                         from.name()
                     );
                 }
-                for file in &files {
+                for file in files.iter().take(PROMPT_FILE_LIMIT) {
                     println!("  saved {}", file.path.display());
                 }
+                if files.len() > PROMPT_FILE_LIMIT {
+                    println!("  … and {} more", files.len() - PROMPT_FILE_LIMIT);
+                }
                 println!(
-                    "Received {} file(s), {} from \"{}\" in {:.1} s ({:.1} MB/s)",
+                    "Received {} file(s), {} from \"{}\" in {:.1} s ({:.1} MB/s, {} stream(s))",
                     summary.files,
                     format_bytes(summary.bytes),
                     from.name(),
                     summary.duration.as_secs_f64(),
-                    summary.megabytes_per_second()
+                    summary.megabytes_per_second(),
+                    summary.streams
                 );
             }
             Ok(ReceiveOutcome::Rejected { from }) => {
                 println!("Declined the transfer from \"{}\".", from.name());
             }
+            Err(err) if err.is_retryable() || matches!(err, TransferError::Superseded) => {
+                eprintln!("Transfer interrupted ({err}); kept the partial files for resuming.");
+            }
             Err(err) => eprintln!("Transfer failed: {err}"),
+        }
+    }
+
+    fn connection_refused(&self, error: &TransferError) {
+        // Dropped connections are routine (reconnects, port scanners); only
+        // identity problems deserve the user's attention.
+        if matches!(
+            error,
+            TransferError::IdentityMismatch { .. } | TransferError::TrustedKeyMismatch { .. }
+        ) {
+            eprintln!("Refused a connection: {error}");
         }
     }
 }
@@ -286,41 +379,84 @@ async fn send(
     trust: TrustStore,
     to: SocketAddr,
     files: Vec<PathBuf>,
+    options: SendOptions,
+    json: bool,
 ) -> Result<()> {
     let mut printer = ProgressPrinter::new("Sending");
-    let result = send_to(to, &device, &trust, &files, |event| match event {
+    let result = send_to(to, &device, &trust, &files, &options, |event| match event {
         SendEvent::Connected(peer) => {
-            println!(
+            eprintln!(
                 "Connected to \"{}\" ({}), encrypted.",
                 peer.name(),
                 peer.device_id()
             );
-            println!("{}", trust_line(&peer));
-            println!(
+            eprintln!("{}", trust_line(&peer));
+            eprintln!(
                 "  Verification code: {}  (the receiver shows the same code)",
                 format_code(&peer.verification_code)
             );
-            println!("Waiting for the receiver to accept…");
+            eprintln!("Waiting for the receiver to accept…");
         }
+        SendEvent::Accepted { resumed_bytes } if resumed_bytes > 0 => {
+            printer.interrupt();
+            eprintln!(
+                "Resuming: the receiver already has {}.",
+                format_bytes(resumed_bytes)
+            );
+        }
+        SendEvent::Accepted { .. } => {}
         SendEvent::Progress(p) => printer.update(p),
+        SendEvent::Reconnecting { attempt, error } => {
+            printer.interrupt();
+            eprintln!("Connection lost ({error}); reconnecting (attempt {attempt})…");
+        }
     })
     .await;
     printer.finish();
     match result.with_context(|| format!("sending to {to} failed"))? {
         SendOutcome::Completed(summary) => {
-            println!(
-                "Sent {} file(s), {} in {:.1} s ({:.1} MB/s)",
+            eprintln!(
+                "Sent {} file(s), {} in {:.1} s ({:.1} MB/s, peak {:.1} MB/s, {} stream(s){})",
                 summary.files,
                 format_bytes(summary.bytes),
                 summary.duration.as_secs_f64(),
-                summary.megabytes_per_second()
+                summary.megabytes_per_second(),
+                summary.peak_mb_per_s,
+                summary.streams,
+                match summary.reconnects {
+                    0 => String::new(),
+                    n => format!(", {n} reconnect(s)"),
+                }
             );
+            if json {
+                println!("{}", summary_json(&summary));
+            }
             Ok(())
         }
         SendOutcome::Rejected { reason } => {
             anyhow::bail!("the receiver declined the transfer: {reason}")
         }
     }
+}
+
+/// One line of JSON for scripts (the benchmark runner).
+fn summary_json(s: &TransferSummary) -> String {
+    format!(
+        concat!(
+            "{{\"files\":{},\"bytes\":{},\"seconds\":{:.3},\"mb_per_s\":{:.2},",
+            "\"peak_mb_per_s\":{:.2},\"setup_ms\":{},\"streams\":{},\"reconnects\":{},",
+            "\"resent_chunks\":{},\"link\":\"tcp\"}}"
+        ),
+        s.files,
+        s.bytes,
+        s.duration.as_secs_f64(),
+        s.megabytes_per_second(),
+        s.peak_mb_per_s,
+        s.setup.as_millis(),
+        s.streams,
+        s.reconnects,
+        s.resent_chunks
+    )
 }
 
 fn trust_line(peer: &PeerInfo) -> &'static str {
@@ -342,6 +478,16 @@ fn format_code(code: &str) -> String {
 
 fn hex_key(key: &[u8]) -> String {
     key.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn parse_hex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
 }
 
 /// Prints a single, self-updating progress line at most a few times a second.
@@ -399,10 +545,15 @@ impl ProgressPrinter {
         let _ = std::io::stderr().flush();
     }
 
-    fn finish(&mut self) {
-        if self.printed {
+    /// Ends the current progress line so a message can be printed.
+    fn interrupt(&mut self) {
+        if std::mem::take(&mut self.printed) {
             eprintln!();
         }
+    }
+
+    fn finish(&mut self) {
+        self.interrupt();
     }
 }
 
@@ -449,5 +600,25 @@ mod tests {
     #[test]
     fn codes_are_split_for_reading() {
         assert_eq!(format_code("042137"), "042 137");
+    }
+
+    #[test]
+    fn hex_parsing() {
+        assert_eq!(parse_hex("00ff10"), Some(vec![0, 255, 16]));
+        assert_eq!(parse_hex("0"), None);
+        assert_eq!(parse_hex("zz"), None);
+    }
+
+    #[test]
+    fn summary_json_is_one_valid_looking_line() {
+        let json = summary_json(&TransferSummary {
+            files: 2,
+            bytes: 10,
+            streams: 4,
+            ..TransferSummary::default()
+        });
+        assert!(json.starts_with("{\"files\":2,\"bytes\":10,"));
+        assert!(json.contains("\"streams\":4"));
+        assert!(!json.contains('\n'));
     }
 }

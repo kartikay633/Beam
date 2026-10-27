@@ -22,6 +22,7 @@ pub const TYPE_TRANSFER_COMPLETE: u8 = 0x0A;
 pub const TYPE_CANCEL: u8 = 0x0B;
 pub const TYPE_PING: u8 = 0x0C;
 pub const TYPE_PONG: u8 = 0x0D;
+pub const TYPE_CHUNK_RETRY: u8 = 0x0E;
 pub const TYPE_CLIPBOARD: u8 = 0x10;
 
 /// Size of the DATA header after the type byte.
@@ -42,6 +43,7 @@ pub enum Frame {
     Cancel(Cancel),
     Ping(Ping),
     Pong(Ping),
+    ChunkRetry(ChunkRetry),
     Clipboard(Clipboard),
 }
 
@@ -79,6 +81,7 @@ impl Frame {
             Frame::Cancel(_) => TYPE_CANCEL,
             Frame::Ping(_) => TYPE_PING,
             Frame::Pong(_) => TYPE_PONG,
+            Frame::ChunkRetry(_) => TYPE_CHUNK_RETRY,
             Frame::Clipboard(_) => TYPE_CLIPBOARD,
         }
     }
@@ -99,6 +102,7 @@ impl Frame {
             Frame::Cancel(_) => "CANCEL",
             Frame::Ping(_) => "PING",
             Frame::Pong(_) => "PONG",
+            Frame::ChunkRetry(_) => "CHUNK_RETRY",
             Frame::Clipboard(_) => "CLIPBOARD",
         }
     }
@@ -121,6 +125,7 @@ impl Frame {
             Frame::TransferComplete(m) => encode_cbor(m, out),
             Frame::Cancel(m) => encode_cbor(m, out),
             Frame::Ping(m) | Frame::Pong(m) => encode_cbor(m, out),
+            Frame::ChunkRetry(m) => encode_cbor(m, out),
             Frame::Clipboard(m) => encode_cbor(m, out),
             Frame::Data(_) => unreachable!("handled above"),
         }
@@ -149,6 +154,7 @@ impl Frame {
             TYPE_CANCEL => Frame::Cancel(decode_cbor(frame_type, body)?),
             TYPE_PING => Frame::Ping(decode_cbor(frame_type, body)?),
             TYPE_PONG => Frame::Pong(decode_cbor(frame_type, body)?),
+            TYPE_CHUNK_RETRY => Frame::ChunkRetry(decode_cbor(frame_type, body)?),
             TYPE_CLIPBOARD => Frame::Clipboard(decode_cbor(frame_type, body)?),
             other => return Err(FrameError::UnknownType(other)),
         })

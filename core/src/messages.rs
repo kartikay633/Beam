@@ -153,6 +153,14 @@ pub struct ChunkAck {
     pub chunk_indices: Vec<u64>,
 }
 
+/// 0x0E, receiver → sender: a chunk failed its CHUNK_HASH check and must be
+/// sent again. (Not in SPEC.md's table; see docs/DECISIONS.md.)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChunkRetry {
+    pub file_id: u32,
+    pub chunk_index: u64,
+}
+
 /// 0x09, sender → receiver, after the last CHUNK_HASH of a file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileDone {

@@ -51,6 +51,11 @@ Thumbs.db
 
 # ---- Benchmarks ----
 bench/data/
+bench/work/
+
+# ---- Python ----
+.venv/
+__pycache__/
 
 # ---- Fuzzing ----
 **/fuzz/artifacts/
