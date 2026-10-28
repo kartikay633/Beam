@@ -328,6 +328,22 @@ where
     rx
 }
 
+/// Waits briefly for a CANCEL on the control connection. A peer that cancels
+/// sends CANCEL and then closes everything, and its connections can look
+/// broken here before the CANCEL is read: call this before treating a
+/// broken connection as a network problem (which would wait for a resume).
+pub(crate) async fn pending_cancel(
+    frames: &mut tokio::sync::mpsc::Receiver<Result<Frame, TransferError>>,
+) -> Option<String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+    while let Ok(Some(Ok(frame))) = tokio::time::timeout_at(deadline, frames.recv()).await {
+        if let Frame::Cancel(cancel) = frame {
+            return Some(cancel.reason);
+        }
+    }
+    None
+}
+
 /// Positional write: `buf` at `offset`, independent of any file cursor, so
 /// chunks can land in any order.
 pub(crate) fn write_all_at(

@@ -27,8 +27,8 @@ use crate::frame::Frame;
 use crate::messages::{Cancel, ChunkHash, FileDone, Hash32, Offer, Ping, StreamOpen};
 use crate::secure::{secure_connection, Role};
 use crate::transfer::{
-    chunk_end, open_control, spawn_control_reader, LocalDevice, Progress, TransferError,
-    CHUNK_SIZE, MAX_CHUNK_RETRIES, MAX_STREAMS, PING_INTERVAL,
+    chunk_end, open_control, pending_cancel, spawn_control_reader, LocalDevice, Progress,
+    TransferError, CHUNK_SIZE, MAX_CHUNK_RETRIES, MAX_STREAMS, PING_INTERVAL,
 };
 use crate::trust::TrustStore;
 
@@ -318,19 +318,6 @@ pub(super) async fn run(
             }
         }
     }
-}
-
-/// Waits briefly for a CANCEL on the control connection.
-async fn pending_cancel(
-    frames: &mut mpsc::Receiver<Result<Frame, TransferError>>,
-) -> Option<String> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
-    while let Ok(Some(Ok(frame))) = tokio::time::timeout_at(deadline, frames.recv()).await {
-        if let Frame::Cancel(cancel) = frame {
-            return Some(cancel.reason);
-        }
-    }
-    None
 }
 
 /// Sends FILE_DONE for every file that is fully acknowledged and whose

@@ -180,3 +180,23 @@ Bugs that took more than an hour to fix. For each one: symptom, root cause, fix.
   success, so it worked by accident.
 - **Fix:** Compare with `BluetoothStatusCodes.SUCCESS`.
 - **Phase:** 7
+
+## A sender's cancel left the receiver waiting for a resume (CI only)
+
+- **Symptom:** `sender_can_cancel_mid_transfer` failed on GitHub's
+  runners, Linux and Windows, from Phase 7 on: the receiver never reported
+  an outcome, and the test timed out after 120 s. It passed every time
+  locally, even pinned to two cores.
+- **Root cause:** The mirror image of the receiver-cancel bug from Phase 5.
+  A cancelling sender sends CANCEL on the control connection and then drops
+  every connection. The receiver's `select!` can see a data stream break,
+  or a write on the control connection fail, before it reads the CANCEL.
+  It treats that as a network drop (retryable) and keeps the transfer
+  around for a resume that never comes. Phase 5 fixed only the sender side
+  (`pending_cancel`); slower runners made the receiver side lose the race.
+- **Fix:** `pending_cancel` moved to `transfer.rs`. When the receiver's
+  session ends with a retryable error, it now drains the control
+  connection for up to 500 ms looking for a CANCEL first, exactly like the
+  sender. Lesson: when one side gets a race fix, check whether the other
+  direction has the same race.
+- **Phase:** 7

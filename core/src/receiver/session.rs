@@ -25,9 +25,9 @@ use crate::messages::{
 use crate::sanitize::{sanitize_file_name, unique_file_name};
 use crate::secure::HandshakeInfo;
 use crate::transfer::{
-    answer_control, chunk_count, chunk_end, hash_file, spawn_control_reader, PeerInfo, Progress,
-    TransferError, TransferSummary, ACK_INTERVAL, CHECKPOINT_INTERVAL, CHUNK_SIZE,
-    MAX_CHUNK_RETRIES, MAX_FILES_PER_OFFER, MAX_RAW_NAME_BYTES, PING_INTERVAL,
+    answer_control, chunk_count, chunk_end, hash_file, pending_cancel, spawn_control_reader,
+    PeerInfo, Progress, TransferError, TransferSummary, ACK_INTERVAL, CHECKPOINT_INTERVAL,
+    CHUNK_SIZE, MAX_CHUNK_RETRIES, MAX_FILES_PER_OFFER, MAX_RAW_NAME_BYTES, PING_INTERVAL,
 };
 use crate::trust::TrustedDevice;
 use crate::visibility::VisibilityMode;
@@ -655,6 +655,17 @@ impl IncomingTransfer {
             }
         }
         .await;
+
+        // The sender cancelling closes its connections right after sending
+        // CANCEL; a stream or write may fail here first. Read the CANCEL
+        // rather than wait for a resume that will never come.
+        let result = match result {
+            Err(err) if err.is_retryable() => match pending_cancel(&mut frames).await {
+                Some(reason) => Err(TransferError::Cancelled(reason)),
+                None => Err(err),
+            },
+            other => other,
+        };
 
         // A transfer ending for good tells the sender *before* the data
         // connections close; otherwise the sender would see them drop first,
