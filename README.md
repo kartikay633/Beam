@@ -3,7 +3,9 @@
 **AirDrop for Android ↔ Windows:** fast, end-to-end encrypted file and clipboard
 sharing that works even with no shared Wi-Fi network and no internet.
 
-> **Status: in development.** Nothing is usable yet. Follow progress in
+> **Status: in development.** Phone ↔ laptop transfers work on the same
+> Wi-Fi network (the Android app, the Windows app and the CLI). Transfers
+> with no shared network come next. Follow progress in
 > [docs/SPEC.md](docs/SPEC.md).
 
 ## Repository layout
@@ -14,7 +16,7 @@ sharing that works even with no shared Wi-Fi network and no internet.
 | `core-ffi/` | UniFFI wrapper exposing `beam-core` to Kotlin |
 | `cli/` | `beam-cli`: send / receive / discover from a terminal |
 | `desktop/` | Windows desktop app (Tauri v2, React + TypeScript) |
-| `android/` | Android app, Kotlin + Jetpack Compose (later phase) |
+| `android/` | Android app, Kotlin + Jetpack Compose |
 | `bench/` | Benchmark scripts, results and charts |
 | `docs/` | Spec, protocol, design decisions, learnings |
 
@@ -39,6 +41,24 @@ It sits in the tray, shows nearby devices, takes files by drag-and-drop or
 Explorer's **Send to → Beam**, and asks before accepting anything (an
 always-on-top popup with the verification code). It works with the CLI and
 with other copies of the app. See [desktop/README.md](desktop/README.md).
+
+## Android app
+
+```bash
+cd android
+./gradlew assembleDebug
+```
+
+This builds the Rust library for each Android ABI with `cargo-ndk`,
+generates its Kotlin bindings, and builds `app/build/outputs/apk/debug/app-debug.apk`.
+It needs the Android SDK and NDK, JDK 21 and `cargo-ndk`: see
+[android/README.md](android/README.md).
+
+Share photos or files to **Beam** from any app (or pick them in Beam), then
+tap a nearby device. Received files go to `Download/Beam`. To pair with the
+desktop app, open **Pair a phone** on the laptop and scan its QR code from
+**Devices → Pair with a laptop**; the two then trust each other and can find
+each other in "trusted only" mode.
 
 ## Trying it from the command line (same network)
 
@@ -93,6 +113,8 @@ Other commands:
 | `beam-cli trust add <public key> --name N [--auto-accept]` | Trust a device by its public key |
 | `beam-cli trust list` | List trusted devices |
 | `beam-cli trust remove <id>` | Stop trusting a device (takes effect immediately, even for a running receiver) |
+| `beam-cli receive --pair` | Also print a one-time pairing code (valid 5 minutes) |
+| `beam-cli pair '<beam://pair?… code>'` | Pair with the device that printed or showed that code: both then trust each other |
 
 To send between two machines, use the receiver's LAN IP address. The wire
 format is described in [docs/PROTOCOL.md](docs/PROTOCOL.md).

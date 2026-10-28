@@ -196,6 +196,21 @@ pub struct Ping {
     pub nonce: u64,
 }
 
+/// 0x11, scanning device → shown device, on a control connection in place
+/// of OFFER: proves the sender scanned this device's pairing QR code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairRequest {
+    #[serde(with = "serde_bytes")]
+    pub token: [u8; 16],
+}
+
+/// 0x12, answer to PAIR_REQUEST.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairResult {
+    pub accepted: bool,
+    pub reason: String,
+}
+
 /// 0x10, both directions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Clipboard {

@@ -86,6 +86,7 @@ export interface PairingInfo {
   svg: string;
   deviceId: string;
   addresses: string[];
+  validForSecs: number;
 }
 
 export const isTauri = "__TAURI_INTERNALS__" in window;
@@ -210,6 +211,7 @@ async function demoInvoke<T>(command: string, args: Record<string, unknown>): Pr
         svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 21 21"><rect width="21" height="21" fill="#fff"/><path d="M1 1h7v7H1zM13 1h7v7h-7zM1 13h7v7H1z" fill="#000"/><path d="M3 3h3v3H3zM15 3h3v3h-3zM3 15h3v3H3z" fill="#fff"/><path d="M10 10h2v2h-2zM14 14h3v3h-3z" fill="#000"/></svg>',
         deviceId: demo.me.deviceId,
         addresses: ["192.168.1.17:9000"],
+        validForSecs: 300,
       } as T;
     case "send_staged":
       demoUpdate((s) => {

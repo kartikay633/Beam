@@ -1,13 +1,11 @@
-//! The pairing QR code (SPEC.md section 6.3): everything a phone needs to
-//! trust this computer and reach it, as a `beam://pair` link.
-//!
-//! ```text
-//! beam://pair?v=1&id=<16 hex>&key=<64 hex>&name=<percent-encoded>&addr=<ip:port,ip:port>
-//! ```
+//! The pairing QR code (SPEC.md section 6.3): a `beam://pair` link with this
+//! computer's id, key, name and addresses, plus a one-time token (see
+//! `beam_core::pairing`). A phone that scans it trusts this computer and,
+//! by presenting the token, gets trusted back.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
-use beam_core::LocalDevice;
+use beam_core::{LocalDevice, PairingCode, PairingWindow};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -18,20 +16,27 @@ pub struct PairingInfo {
     pub svg: String,
     pub device_id: String,
     pub addresses: Vec<String>,
+    /// How long the code stays valid.
+    pub valid_for_secs: u64,
 }
 
-pub fn pairing_info(me: &LocalDevice, port: u16) -> PairingInfo {
-    let addresses = lan_addresses()
-        .into_iter()
-        .map(|ip| match ip {
-            IpAddr::V4(v4) => format!("{v4}:{port}"),
-            IpAddr::V6(v6) => format!("[{v6}]:{port}"),
-        })
-        .collect::<Vec<_>>();
-    let uri = pairing_uri(me, &addresses);
+/// Opens a new pairing window (earlier codes stop working) and returns the
+/// code to show.
+pub fn pairing_info(me: &LocalDevice, port: u16, window: &PairingWindow) -> PairingInfo {
+    let code = PairingCode {
+        device_id: me.device_id(),
+        public_key: *me.identity.public_key(),
+        name: me.name.clone(),
+        addresses: lan_addresses()
+            .into_iter()
+            .map(|ip| SocketAddr::new(ip, port))
+            .collect(),
+        token: window.open(),
+    };
+    let uri = code.to_uri();
     let svg = qrcode::QrCode::new(uri.as_bytes())
-        .map(|code| {
-            code.render::<qrcode::render::svg::Color>()
+        .map(|qr| {
+            qr.render::<qrcode::render::svg::Color>()
                 .min_dimensions(256, 256)
                 .quiet_zone(true)
                 .build()
@@ -41,18 +46,9 @@ pub fn pairing_info(me: &LocalDevice, port: u16) -> PairingInfo {
         uri,
         svg,
         device_id: me.device_id().to_string(),
-        addresses,
+        addresses: code.addresses.iter().map(|a| a.to_string()).collect(),
+        valid_for_secs: beam_core::pairing::PAIRING_CODE_LIFETIME.as_secs(),
     }
-}
-
-fn pairing_uri(me: &LocalDevice, addresses: &[String]) -> String {
-    format!(
-        "beam://pair?v=1&id={}&key={}&name={}&addr={}",
-        hex::encode(me.device_id().0),
-        hex::encode(me.identity.public_key()),
-        percent_encode(&me.name),
-        percent_encode(&addresses.join(",")),
-    )
 }
 
 /// Non-loopback addresses a phone on the same network could use: IPv4
@@ -72,46 +68,25 @@ fn lan_addresses() -> Vec<IpAddr> {
     ips
 }
 
-/// Percent-encodes everything except RFC 3986 unreserved characters.
-fn percent_encode(s: &str) -> String {
-    s.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use beam_core::{DeviceType, Identity};
 
     #[test]
-    fn uri_carries_id_key_name_and_addresses() {
+    fn code_parses_back_and_each_view_gets_a_new_token() {
         let me = LocalDevice {
             identity: Identity::generate(),
             name: "Kartikay's PC".into(),
             device_type: DeviceType::Laptop,
         };
-        let uri = pairing_uri(&me, &["192.168.1.20:9000".into(), "10.0.0.5:9000".into()]);
-        assert!(uri.starts_with("beam://pair?v=1&id="));
-        assert!(uri.contains(&format!("&key={}", hex::encode(me.identity.public_key()))));
-        assert!(uri.contains("&name=Kartikay%27s%20PC"));
-        assert!(uri.contains("&addr=192.168.1.20%3A9000%2C10.0.0.5%3A9000"));
-    }
-
-    #[test]
-    fn qr_code_renders() {
-        let me = LocalDevice {
-            identity: Identity::generate(),
-            name: "PC".into(),
-            device_type: DeviceType::Laptop,
-        };
-        let info = pairing_info(&me, 9000);
-        assert!(info.svg.starts_with("<?xml") || info.svg.starts_with("<svg"));
-        assert!(info.svg.contains("<svg"));
+        let window = PairingWindow::default();
+        let first = pairing_info(&me, 9000, &window);
+        let second = pairing_info(&me, 9000, &window);
+        let parsed = PairingCode::parse(&first.uri).unwrap();
+        assert_eq!(parsed.device_id, me.device_id());
+        assert_eq!(parsed.name, "Kartikay's PC");
+        assert_ne!(first.uri, second.uri, "a fresh one-time token each time");
+        assert!(first.svg.contains("<svg"));
     }
 }

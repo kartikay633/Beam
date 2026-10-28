@@ -27,8 +27,8 @@ use crate::frame::Frame;
 use crate::messages::{Cancel, ChunkHash, FileDone, Hash32, Offer, Ping, StreamOpen};
 use crate::secure::{secure_connection, Role};
 use crate::transfer::{
-    chunk_end, open_control, read_exact_at, spawn_control_reader, LocalDevice, Progress,
-    TransferError, CHUNK_SIZE, MAX_CHUNK_RETRIES, MAX_STREAMS, PING_INTERVAL,
+    chunk_end, open_control, spawn_control_reader, LocalDevice, Progress, TransferError,
+    CHUNK_SIZE, MAX_CHUNK_RETRIES, MAX_STREAMS, PING_INTERVAL,
 };
 use crate::trust::TrustStore;
 
@@ -348,7 +348,7 @@ async fn send_ready_file_dones(
             continue;
         };
         let blake3_full = result.map_err(|e| {
-            TransferError::local_file(&plan.files[index].path)(std::io::Error::other(e))
+            TransferError::local_file(&plan.files[index].source.label())(std::io::Error::other(e))
         })?;
         control
             .write_frame(&Frame::FileDone(FileDone {
@@ -460,10 +460,9 @@ async fn stream_loop(
                 .insert(chunk, permits);
 
             buf.resize(len as usize, 0);
-            let path = file.path.clone();
+            let source = file.source.clone();
             buf = tokio::task::spawn_blocking(move || {
-                let f = std::fs::File::open(&path)?;
-                read_exact_at(&f, &mut buf, start)?;
+                source.read_at(&mut buf, start)?;
                 Ok::<_, std::io::Error>(buf)
             })
             .await
@@ -471,10 +470,10 @@ async fn stream_loop(
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::UnexpectedEof {
                     TransferError::FileChanged {
-                        file: file.path.display().to_string(),
+                        file: file.source.label().display().to_string(),
                     }
                 } else {
-                    TransferError::local_file(&file.path)(e)
+                    TransferError::local_file(&file.source.label())(e)
                 }
             })?;
             let hash = blake3::hash(&buf);

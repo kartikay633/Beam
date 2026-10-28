@@ -13,9 +13,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use beam_core::discovery::first_reachable;
 use beam_core::{
     send_to, Advertiser, BoxFuture, Browser, Decision, DeviceId, DeviceType, DiscoveryEvent,
-    IncomingOffer, LocalDevice, NearbyDevice, Progress, ReceiveHandler, ReceiveOutcome, Receiver,
-    ReceiverConfig, ReceiverHandle, SendEvent, SendOptions, SendOutcome, TransferError, TrustStore,
-    TrustedDevice, Visibility, VisibilityMode,
+    IncomingOffer, LocalDevice, NearbyDevice, PairingWindow, Progress, ReceiveHandler,
+    ReceiveOutcome, Receiver, ReceiverConfig, ReceiverHandle, SendEvent, SendOptions, SendOutcome,
+    TransferError, TrustStore, TrustedDevice, Visibility, VisibilityMode,
 };
 use serde::Serialize;
 use tauri::async_runtime::JoinHandle;
@@ -39,6 +39,8 @@ pub struct AppState {
     pub device: LocalDevice,
     pub trust: TrustStore,
     pub visibility: Visibility,
+    /// The pairing code on the Pair page, if it's open.
+    pub pairing: PairingWindow,
     settings: Mutex<Settings>,
     ui: Mutex<UiState>,
     receiver: Mutex<Option<RunningReceiver>>,
@@ -269,6 +271,7 @@ impl AppState {
             },
             trust,
             visibility: Visibility::new(mode),
+            pairing: PairingWindow::default(),
             settings: Mutex::new(settings),
             config_dir,
             ui: Mutex::default(),
@@ -296,6 +299,7 @@ impl AppState {
             download_dir: self.settings().download_dir,
             trust: self.trust.clone(),
             visibility: self.visibility.clone(),
+            pairing: self.pairing.clone(),
         };
         let previous_port = lock(&self.receiver).as_ref().map(|r| r.port);
         let receiver = match Receiver::bind(
@@ -853,6 +857,11 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 struct DesktopHandler(Arc<AppState>);
 
 impl ReceiveHandler for DesktopHandler {
+    fn paired(&self, device: &beam_core::PeerInfo) {
+        let _ = self.0.app.emit("paired", device.name().to_string());
+        self.0.emit();
+    }
+
     fn decide(&self, offer: IncomingOffer) -> BoxFuture<Decision> {
         let state = self.0.clone();
         Box::pin(async move {

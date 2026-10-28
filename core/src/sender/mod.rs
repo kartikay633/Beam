@@ -22,8 +22,8 @@ use uuid::Uuid;
 use crate::connection::ConnectionError;
 use crate::messages::{DeviceId, FileEntry, Hash32};
 use crate::transfer::{
-    chunk_count, hash_file, LocalDevice, PeakMeter, PeerInfo, Progress, TransferError,
-    TransferSummary,
+    chunk_count, hash_open_file, read_exact_at, LocalDevice, PeakMeter, PeerInfo, Progress,
+    TransferError, TransferSummary,
 };
 use crate::trust::TrustStore;
 
@@ -84,11 +84,76 @@ pub enum SendOutcome {
     Rejected { reason: String },
 }
 
+/// Something to send: a file path, or a file that is already open (for
+/// example an Android content URI opened as a file descriptor).
+#[derive(Debug, Clone)]
+pub struct SendSource {
+    kind: SourceKind,
+}
+
+#[derive(Debug, Clone)]
+enum SourceKind {
+    Path(PathBuf),
+    Open {
+        file: Arc<std::fs::File>,
+        name: String,
+        modified_unix: i64,
+    },
+}
+
+impl SendSource {
+    pub fn path(path: impl Into<PathBuf>) -> SendSource {
+        SendSource {
+            kind: SourceKind::Path(path.into()),
+        }
+    }
+
+    /// An open, seekable file. It is read with positional reads, so it must
+    /// be a regular file (not a pipe). `name` is what the receiver sees.
+    pub fn open_file(
+        file: std::fs::File,
+        name: impl Into<String>,
+        modified_unix: i64,
+    ) -> SendSource {
+        SendSource {
+            kind: SourceKind::Open {
+                file: Arc::new(file),
+                name: name.into(),
+                modified_unix,
+            },
+        }
+    }
+
+    /// How errors refer to it.
+    pub(crate) fn label(&self) -> PathBuf {
+        match &self.kind {
+            SourceKind::Path(path) => path.clone(),
+            SourceKind::Open { name, .. } => PathBuf::from(name),
+        }
+    }
+
+    /// Reads exactly `buf.len()` bytes at `offset` (blocking).
+    pub(crate) fn read_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        match &self.kind {
+            SourceKind::Path(path) => read_exact_at(&std::fs::File::open(path)?, buf, offset),
+            SourceKind::Open { file, .. } => read_exact_at(file, buf, offset),
+        }
+    }
+
+    /// BLAKE3 of the first `len` bytes (blocking).
+    pub(crate) fn hash(&self, len: u64) -> std::io::Result<blake3::Hash> {
+        match &self.kind {
+            SourceKind::Path(path) => hash_open_file(&std::fs::File::open(path)?, len),
+            SourceKind::Open { file, .. } => hash_open_file(file, len),
+        }
+    }
+}
+
 /// One file of the transfer, as offered.
 #[derive(Debug, Clone)]
 pub(crate) struct OutgoingFile {
     pub entry: FileEntry,
-    pub path: PathBuf,
+    pub source: SendSource,
     pub chunks: u64,
 }
 
@@ -137,17 +202,18 @@ impl FullHashes {
         if files.is_empty() {
             return;
         }
-        let jobs: Vec<(usize, PathBuf)> = files
+        let jobs: Vec<(usize, SendSource, u64)> = files
             .into_iter()
-            .map(|i| (i, plan.files[i].path.clone()))
+            .map(|i| (i, plan.files[i].source.clone(), plan.files[i].entry.size))
             .collect();
         let worker = self.clone();
         let task = tokio::spawn(async move {
-            for (index, path) in jobs {
+            for (index, source, len) in jobs {
                 let result = tokio::task::spawn_blocking(move || {
-                    hash_file(&path)
+                    source
+                        .hash(len)
                         .map(Hash32::from)
-                        .map_err(|e| format!("{}: {e}", path.display()))
+                        .map_err(|e| format!("{}: {e}", source.label().display()))
                 })
                 .await
                 .unwrap_or_else(|e| Err(e.to_string()));
@@ -215,10 +281,23 @@ pub async fn send_to(
     trust: &TrustStore,
     paths: &[PathBuf],
     options: &SendOptions,
+    on_event: impl FnMut(SendEvent),
+) -> Result<SendOutcome, TransferError> {
+    let sources = paths.iter().cloned().map(SendSource::path).collect();
+    send_sources(addr, me, trust, sources, options, on_event).await
+}
+
+/// Like [`send_to`], for paths and already-open files alike.
+pub async fn send_sources(
+    addr: impl ToSocketAddrs,
+    me: &LocalDevice,
+    trust: &TrustStore,
+    sources: Vec<SendSource>,
+    options: &SendOptions,
     mut on_event: impl FnMut(SendEvent),
 ) -> Result<SendOutcome, TransferError> {
-    // Fail on a bad path before touching the network.
-    let files = describe_files(paths).await?;
+    // Fail on a bad file before touching the network.
+    let files = describe_files(sources).await?;
     let addr = resolve(addr).await?;
     let plan = Arc::new(TransferPlan {
         transfer_id: Uuid::new_v4(),
@@ -326,27 +405,38 @@ async fn resolve(addr: impl ToSocketAddrs) -> Result<SocketAddr, TransferError> 
         })
 }
 
-async fn describe_files(paths: &[PathBuf]) -> Result<Vec<OutgoingFile>, TransferError> {
-    let mut files = Vec::with_capacity(paths.len());
-    for (index, path) in paths.iter().enumerate() {
-        let metadata = tokio::fs::metadata(path)
-            .await
-            .map_err(TransferError::local_file(path))?;
+async fn describe_files(sources: Vec<SendSource>) -> Result<Vec<OutgoingFile>, TransferError> {
+    let mut files = Vec::with_capacity(sources.len());
+    for (index, source) in sources.into_iter().enumerate() {
+        let label = source.label();
+        let metadata = match &source.kind {
+            SourceKind::Path(path) => tokio::fs::metadata(path).await,
+            SourceKind::Open { file, .. } => file.metadata(),
+        }
+        .map_err(TransferError::local_file(&label))?;
         if !metadata.is_file() {
-            return Err(TransferError::local_file(path)(std::io::Error::new(
+            return Err(TransferError::local_file(&label)(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "not a regular file",
             )));
         }
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "file".to_string());
-        let modified_unix = metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_secs() as i64);
+        let (name, modified_unix) = match &source.kind {
+            SourceKind::Path(path) => (
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "file".to_string()),
+                metadata
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_secs() as i64),
+            ),
+            SourceKind::Open {
+                name,
+                modified_unix,
+                ..
+            } => (name.clone(), *modified_unix),
+        };
         let file_id = u32::try_from(index)
             .map_err(|_| TransferError::InvalidOffer("too many files".to_string()))?;
         files.push(OutgoingFile {
@@ -357,7 +447,7 @@ async fn describe_files(paths: &[PathBuf]) -> Result<Vec<OutgoingFile>, Transfer
                 size: metadata.len(),
                 modified_unix,
             },
-            path: path.clone(),
+            source,
             chunks: chunk_count(metadata.len()),
         });
     }

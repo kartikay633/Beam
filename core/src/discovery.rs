@@ -14,6 +14,13 @@
 //! Instance and host names are built from the id (or the `rid`), so the
 //! computer's own host name is never broadcast.
 //!
+//! [`Advertiser`] and [`Browser`] do mDNS with the `mdns-sd` crate. A
+//! platform with its own mDNS stack (Android's `NsdManager`) instead asks
+//! [`announcement`] what to register, re-registers at
+//! [`next_announcement_change`], and hands resolved services to
+//! [`interpret_service`], so the TXT format and the rotating identifier stay
+//! in one place.
+//!
 //! mDNS is unauthenticated: anyone can announce any name. A device found
 //! here is only a *hint*; the sender then checks, through the Noise handshake,
 //! that it reached the device id it was looking for.
@@ -233,6 +240,53 @@ fn truncate(s: &str, max_bytes: usize) -> &str {
 
 /// Announces this device on the local network while it exists, following
 /// visibility changes, the "everyone" expiry and the 15-minute rotation.
+/// A service to register with the platform's mDNS stack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceAnnouncement {
+    /// Instance name, e.g. `beam-1a2b3c4d5e6f7a8b`.
+    pub instance_name: String,
+    pub txt: Vec<(String, String)>,
+}
+
+/// What `me` should announce in `mode` right now, or `None` when off.
+pub fn announcement(me: &LocalDevice, mode: VisibilityMode) -> Option<ServiceAnnouncement> {
+    Announcement::of(me, mode, current_window()).map(|a| ServiceAnnouncement {
+        instance_name: a.instance_name(),
+        txt: a.txt(),
+    })
+}
+
+/// When the announcement may next change without anyone touching the
+/// visibility: the end of "everyone", or the next rotation window.
+pub fn next_announcement_change(visibility: &Visibility) -> tokio::time::Instant {
+    let now = crate::receiver::now_unix();
+    let next = (now / ROTATION.as_secs() + 1) * ROTATION.as_secs();
+    let next_window = tokio::time::Instant::now() + Duration::from_secs(next - now);
+    match (visibility.mode(), visibility.everyone_until()) {
+        (VisibilityMode::Everyone, Some(until)) => until.min(next_window),
+        _ => next_window,
+    }
+}
+
+/// Turns a service the platform resolved (its TXT record and addresses)
+/// into a device to show. `None` for our own announcement, anything
+/// malformed, and trusted-only devices we don't trust.
+pub fn interpret_service(
+    txt: &HashMap<String, String>,
+    ips: impl IntoIterator<Item = IpAddr>,
+    port: u16,
+    me: &LocalDevice,
+    trusted: &[TrustedDevice],
+) -> Option<NearbyDevice> {
+    let addresses = socket_addrs(ips.into_iter(), port);
+    Announcement::parse(txt)?.interpret(
+        addresses,
+        me.identity.public_key(),
+        trusted,
+        current_window(),
+    )
+}
+
 pub struct Advertiser {
     task: tokio::task::JoinHandle<()>,
     daemon: ServiceDaemon,
@@ -289,18 +343,9 @@ async fn advertise(daemon: ServiceDaemon, me: LocalDevice, port: u16, visibility
 
         // Wake for an explicit change, the end of "everyone", or the next
         // rotation window, whichever comes first.
-        let next_window = {
-            let now = crate::receiver::now_unix();
-            let next = (now / ROTATION.as_secs() + 1) * ROTATION.as_secs();
-            tokio::time::Instant::now() + Duration::from_secs(next - now)
-        };
-        let deadline = match (mode, visibility.everyone_until()) {
-            (VisibilityMode::Everyone, Some(until)) => until.min(next_window),
-            _ => next_window,
-        };
         tokio::select! {
             _ = changes.changed() => {}
-            _ = tokio::time::sleep_until(deadline) => {}
+            _ = tokio::time::sleep_until(next_announcement_change(&visibility)) => {}
         }
     }
 }
@@ -491,6 +536,33 @@ mod tests {
 
     fn trusted(device: &LocalDevice) -> TrustedDevice {
         TrustedDevice::new(device.name.clone(), *device.identity.public_key(), false)
+    }
+
+    #[test]
+    fn platform_services_use_the_same_announcements() {
+        let phone = device("Pixel");
+        let laptop = device("ThinkPad");
+
+        let open = announcement(&laptop, VisibilityMode::Everyone).unwrap();
+        assert_eq!(
+            open.instance_name,
+            format!("beam-{}", hex::encode(laptop.device_id().0))
+        );
+        let txt: HashMap<String, String> = open.txt.into_iter().collect();
+        let ip: IpAddr = "192.168.1.20".parse().unwrap();
+        let found = interpret_service(&txt, [ip], 9000, &phone, &[]).unwrap();
+        assert_eq!(found.device_id, laptop.device_id());
+        assert_eq!(found.addresses, vec![SocketAddr::new(ip, 9000)]);
+        // Our own announcement, seen by the platform browser, is hidden.
+        assert!(interpret_service(&txt, [ip], 9000, &laptop, &[]).is_none());
+
+        let hidden = announcement(&laptop, VisibilityMode::TrustedOnly).unwrap();
+        let txt: HashMap<String, String> = hidden.txt.into_iter().collect();
+        assert!(interpret_service(&txt, [ip], 9000, &phone, &[]).is_none());
+        let known = interpret_service(&txt, [ip], 9000, &phone, &[trusted(&laptop)]).unwrap();
+        assert_eq!(known.name, "ThinkPad");
+
+        assert!(announcement(&laptop, VisibilityMode::Off).is_none());
     }
 
     #[test]

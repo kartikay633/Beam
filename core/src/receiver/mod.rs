@@ -32,6 +32,7 @@ use uuid::Uuid;
 use crate::connection::{Connection, ConnectionError};
 use crate::frame::Frame;
 use crate::messages::{FileEntry, StreamOpen};
+use crate::pairing::PairingWindow;
 use crate::secure::{secure_connection, HandshakeInfo, Role};
 use crate::transfer::{LocalDevice, PeerInfo, Progress, TransferError, TransferSummary};
 use crate::trust::TrustStore;
@@ -49,6 +50,8 @@ pub struct ReceiverConfig {
     pub trust: TrustStore,
     /// Who may send right now; checked for every offer.
     pub visibility: Visibility,
+    /// The pairing code currently on screen, if any.
+    pub pairing: PairingWindow,
 }
 
 /// What the user is asked to accept. File names are already sanitized.
@@ -113,6 +116,10 @@ pub trait ReceiveHandler: Send + Sync + 'static {
     /// and data is about to flow. Useful for showing transfers that never
     /// went through [`ReceiveHandler::decide`].
     fn accepted(&self, _offer: &IncomingOffer, _resumed: bool) {}
+
+    /// A device that scanned our pairing code is now trusted (with
+    /// auto-accept).
+    fn paired(&self, _device: &PeerInfo) {}
 }
 
 /// Controls a running [`Receiver`] from elsewhere (a UI).

@@ -341,6 +341,11 @@ nav {
   border-radius: 10px;
 }
 
+.banner.ok {
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+  color: var(--ok);
+}
+
 .banner.error {
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   color: var(--danger);

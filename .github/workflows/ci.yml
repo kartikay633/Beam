@@ -83,3 +83,47 @@ jobs:
           name: beam-windows-msi
           path: target/release/bundle/msi/*.msi
           if-no-files-found: error
+
+  android:
+    name: Android app (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Install the NDK and SDK platform
+        run: >
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install
+          "ndk;30.0.16248370" "platforms;android-37.0" "build-tools;37.0.0" > /dev/null
+
+      # Builds libbeam_core_ffi.so for all three ABIs, generates the Kotlin
+      # bindings, then the app; runs the JVM tests and lint, and compiles
+      # the instrumented tests (running those needs a device).
+      - name: Build and test
+        working-directory: android
+        run: ./gradlew assembleDebug testDebugUnitTest assembleDebugAndroidTest lintDebug --console=plain
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: beam-android-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

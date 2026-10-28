@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<lint>
+    <!-- UniFFI's generated bindings use java.lang.ref.Cleaner only after
+         checking it exists (API 33+) and otherwise fall back to JNA's. -->
+    <issue id="NewApi">
+        <ignore path="build/generated/uniffi/**" />
+    </issue>
+    <!-- abiFilters come from the beam.abis property, which includes x86_64. -->
+    <issue id="ChromeOsAbiSupport" severity="ignore" />
+</lint>

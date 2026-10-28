@@ -176,6 +176,12 @@ fn frame() -> impl Strategy<Value = Frame> {
         any::<u64>()
             .prop_map(|nonce| Frame::Pong(Ping { nonce }))
             .boxed(),
+        any::<[u8; 16]>()
+            .prop_map(|token| Frame::PairRequest(PairRequest { token }))
+            .boxed(),
+        (any::<bool>(), text())
+            .prop_map(|(accepted, reason)| Frame::PairResult(PairResult { accepted, reason }))
+            .boxed(),
         (text(), ".{0,500}")
             .prop_map(|(mime, text)| Frame::Clipboard(Clipboard { mime, text }))
             .boxed(),

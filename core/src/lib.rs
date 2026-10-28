@@ -7,6 +7,7 @@ pub mod discovery;
 pub mod frame;
 pub mod identity;
 pub mod messages;
+pub mod pairing;
 pub mod receiver;
 pub mod sanitize;
 pub mod secure;
@@ -18,17 +19,20 @@ pub mod visibility;
 pub use connection::{
     Connection, ConnectionError, FrameReader, FrameWriter, PlainCipher, RecordOpener, RecordSealer,
 };
-pub use discovery::{Advertiser, Browser, DiscoveryError, DiscoveryEvent, NearbyDevice};
+pub use discovery::{
+    Advertiser, Browser, DiscoveryError, DiscoveryEvent, NearbyDevice, ServiceAnnouncement,
+};
 pub use frame::{Frame, FrameError};
 pub use identity::{Identity, IdentityError};
 pub use messages::{DeviceId, DeviceType, PROTOCOL_VERSION};
+pub use pairing::{pair_with, PairingCode, PairingCodeError, PairingWindow};
 pub use receiver::{
     BoxFuture, Decision, IncomingOffer, ReceiveHandler, ReceiveOutcome, Receiver, ReceiverConfig,
     ReceiverHandle, SavedFile,
 };
 pub use sanitize::sanitize_file_name;
 pub use secure::{secure_connection, HandshakeInfo, Role};
-pub use sender::{send_to, SendEvent, SendOptions, SendOutcome};
+pub use sender::{send_sources, send_to, SendEvent, SendOptions, SendOutcome, SendSource};
 pub use transfer::{LocalDevice, PeerInfo, Progress, TransferError, TransferSummary, CHUNK_SIZE};
 pub use trust::{TrustStore, TrustStoreError, TrustedDevice};
 pub use visibility::{Visibility, VisibilityMode};

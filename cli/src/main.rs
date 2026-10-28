@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use beam_core::discovery::{first_reachable, resolve};
+use beam_core::{pair_with, PairingCode, PairingWindow};
 use beam_core::{
     send_to, Advertiser, BoxFuture, Browser, Decision, DeviceId, DeviceType, DiscoveryEvent,
     Identity, IncomingOffer, LocalDevice, NearbyDevice, PeerInfo, Progress, ReceiveHandler,
@@ -59,6 +60,15 @@ enum Command {
         /// then trusted), trusted, or off.
         #[arg(long, default_value = "everyone")]
         visibility: VisibilityMode,
+        /// Print a pairing code another device can use with `beam-cli pair`.
+        #[arg(long)]
+        pair: bool,
+    },
+    /// Pair with a device that showed a pairing code (`receive --pair`, or
+    /// the desktop app's QR code), so the two trust each other.
+    Pair {
+        /// The `beam://pair?…` code.
+        code: String,
     },
     /// List Beam devices on the local network as they appear and disappear.
     Discover {
@@ -141,9 +151,29 @@ async fn main() -> Result<()> {
             bind,
             dir,
             visibility,
+            pair,
         } => {
             let device = local_device(&config_dir, cli.name)?;
-            receive(device, trust, SocketAddr::new(bind, port), dir, visibility).await
+            receive(
+                device,
+                trust,
+                SocketAddr::new(bind, port),
+                dir,
+                visibility,
+                pair,
+            )
+            .await
+        }
+        Command::Pair { code } => {
+            let device = local_device(&config_dir, cli.name)?;
+            let code = PairingCode::parse(code.trim())?;
+            eprintln!("Pairing with \"{}\" ({})…", code.name, code.device_id);
+            let trusted = pair_with(&code, &device, &trust).await?;
+            println!(
+                "Paired: \"{}\" ({}) and this device now trust each other.",
+                trusted.name, trusted.device_id
+            );
+            Ok(())
         }
         Command::Discover { seconds } => {
             let device = local_device(&config_dir, cli.name)?;
@@ -237,13 +267,16 @@ async fn receive(
     addr: SocketAddr,
     dir: PathBuf,
     mode: VisibilityMode,
+    show_pairing: bool,
 ) -> Result<()> {
     let visibility = Visibility::new(mode);
+    let pairing = PairingWindow::default();
     let config = ReceiverConfig {
         device: device.clone(),
         download_dir: dir.clone(),
         trust: trust.clone(),
         visibility: visibility.clone(),
+        pairing: pairing.clone(),
     };
     let receiver = Receiver::bind(addr, config)
         .await
@@ -257,9 +290,23 @@ async fn receive(
         me.device_id(),
         dir.display()
     );
-    let _advertiser = Advertiser::start(device, port, visibility.clone())
+    let _advertiser = Advertiser::start(device.clone(), port, visibility.clone())
         .context("could not announce this device on the local network")?;
     println!("{}", describe_visibility(mode));
+    if show_pairing {
+        let code = PairingCode {
+            device_id: device.device_id(),
+            public_key: *device.identity.public_key(),
+            name: device.name.clone(),
+            addresses: lan_addresses(port),
+            token: pairing.open(),
+        };
+        println!(
+            "Pairing code (valid for 5 minutes, one device):\n  {}",
+            code.to_uri()
+        );
+        println!("On the other device: beam-cli pair \"<code>\"");
+    }
     tokio::spawn(report_visibility_expiry(visibility));
     println!("Press Ctrl+C to stop.");
     receiver
@@ -404,6 +451,24 @@ async fn ask_to_accept(offer: IncomingOffer, trust: TrustStore) -> Decision {
         "" => Decision::Reject("no answer".to_string()),
         _ => Decision::Reject("declined by user".to_string()),
     }
+}
+
+/// This machine's non-loopback addresses with `port`, IPv4 first.
+fn lan_addresses(port: u16) -> Vec<SocketAddr> {
+    let mut ips: Vec<IpAddr> = std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|socket| {
+            // Asks the OS which local address would reach the outside world;
+            // nothing is sent.
+            socket.connect("192.0.2.1:9")?;
+            socket.local_addr()
+        })
+        .map(|a| vec![a.ip()])
+        .unwrap_or_default();
+    ips.retain(|ip| !ip.is_loopback() && !ip.is_unspecified());
+    ips.push(IpAddr::from([127, 0, 0, 1]));
+    ips.into_iter()
+        .map(|ip| SocketAddr::new(ip, port))
+        .collect()
 }
 
 fn describe_visibility(mode: VisibilityMode) -> &'static str {

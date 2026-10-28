@@ -173,6 +173,8 @@ pub enum TransferError {
     Superseded,
     #[error("transfer cancelled")]
     CancelledByUser,
+    #[error("pairing refused: {0}")]
+    PairingRefused(String),
     #[error("data connection rejected: {0}")]
     BadDataStream(String),
 }
@@ -371,28 +373,23 @@ pub(crate) fn read_exact_at(
 /// rather than memory-mapping, so memory use stays flat for huge files (a
 /// mapped file counts toward the process's resident memory).
 pub(crate) fn hash_file(path: &Path) -> io::Result<blake3::Hash> {
-    use std::io::Read;
-    const BLOCK: usize = 4 * 1024 * 1024;
-    let mut file = std::fs::File::open(path)?;
+    let file = std::fs::File::open(path)?;
     let len = file.metadata()?.len();
+    hash_open_file(&file, len)
+}
+
+/// BLAKE3 of the first `len` bytes of an open file, with positional reads
+/// (the file's cursor isn't touched, so other readers can share it).
+pub(crate) fn hash_open_file(file: &std::fs::File, len: u64) -> io::Result<blake3::Hash> {
+    const BLOCK: u64 = 4 * 1024 * 1024;
     let mut hasher = blake3::Hasher::new();
-    let mut block = vec![0u8; BLOCK.min(len as usize).max(1)];
-    let block_len = block.len();
-    loop {
-        let mut filled = 0;
-        while filled < block_len {
-            match file.read(&mut block[filled..])? {
-                0 => break,
-                n => filled += n,
-            }
-        }
-        if filled == 0 {
-            break;
-        }
-        hasher.update_rayon(&block[..filled]);
-        if filled < block_len {
-            break;
-        }
+    let mut block = vec![0u8; BLOCK.min(len).max(1) as usize];
+    let mut offset = 0;
+    while offset < len {
+        let n = (len - offset).min(BLOCK) as usize;
+        read_exact_at(file, &mut block[..n], offset)?;
+        hasher.update_rayon(&block[..n]);
+        offset += n as u64;
     }
     Ok(hasher.finalize())
 }

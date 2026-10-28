@@ -102,3 +102,39 @@ Bugs that took more than an hour to fix. For each one: symptom, root cause, fix.
   Messages that end a session must always go out before the connections
   close, because peers read different connections in no particular order.
 - **Phase:** 5
+
+## A UniFFI error field named `message` broke the Kotlin build
+
+- **Symptom:** The generated Kotlin bindings failed to compile:
+  "Conflicting declarations: val message: String" and "'message' hides
+  member of supertype 'Throwable'".
+- **Root cause:** `BeamError::Failed { message: String }` becomes a Kotlin
+  exception class with a `message` property, which clashes with
+  `Throwable.message`. The Rust side and its tests were fine; only the
+  Android build showed it.
+- **Fix:** Renamed the field to `reason`. Error fields must not use names
+  that `Throwable` already has (`message`, `cause`).
+- **Phase:** 6
+
+## `local.properties` with Windows backslashes pointed at "D:androidsdk"
+
+- **Symptom:** Gradle failed with "The filename, directory name, or volume
+  label syntax is incorrect" while working out the dependencies of
+  `compileDebugJavaWithJavac`; only `--stacktrace` showed it came from
+  `SdkLocator`.
+- **Root cause:** `local.properties` is a Java properties file, where `\` is
+  an escape: `sdk.dir=D\:\android\sdk` reads as `D:androidsdk`.
+- **Fix:** `sdk.dir=D\:/android/sdk`. Forward slashes work on Windows, or
+  double the backslashes.
+- **Phase:** 6
+
+## Coroutines in `backgroundScope` never ran under `advanceUntilIdle`
+
+- **Symptom:** Repository tests for sending and saving received files found
+  nothing sent and nothing saved, although the same code worked in the app.
+- **Root cause:** The repository was given the test's `backgroundScope`.
+  `advanceUntilIdle()` returns once only background work is left, so
+  coroutines launched there never ran.
+- **Fix:** Pass the `TestScope` itself; `runTest` then also waits for that
+  work before finishing.
+- **Phase:** 6

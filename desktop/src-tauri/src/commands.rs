@@ -89,7 +89,7 @@ pub async fn update_settings(state: AppStateRef<'_>, settings: Settings) -> Resu
 
 #[tauri::command]
 pub fn pairing_info(state: AppStateRef<'_>) -> PairingInfo {
-    build_pairing_info(&state.device, state.port())
+    build_pairing_info(&state.device, state.port(), &state.pairing)
 }
 
 /// Opens a folder in Explorer (the download folder by default).

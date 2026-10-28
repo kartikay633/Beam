@@ -6,5 +6,29 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+name = "beam_core_ffi"
+# cdylib: the .so loaded by the Android app. lib: Rust tests and the bindgen.
+crate-type = ["cdylib", "lib"]
+
+# Generates the Kotlin bindings from a built library (the Android build runs
+# it): cargo run -p beam-core-ffi --features bindgen --bin uniffi-bindgen --
+# generate --library <libbeam_core_ffi.so> --language kotlin --out-dir <dir>
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
 [dependencies]
 beam-core.workspace = true
+hex = "0.4.3"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "sync", "time", "macros", "net"] }
+uniffi = "0.32.2"
+uuid = "1.29.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"

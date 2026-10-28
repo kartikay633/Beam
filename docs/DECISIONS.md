@@ -592,3 +592,116 @@ data.
 **Why:** Every screen, including the offer popup, can be designed and checked
 in an ordinary browser without building the Rust side. It's how the screens
 were reviewed before the first native run.
+
+## 2026-10-28 — Pairing: a one-time token in the QR code
+
+**What:** The `beam://pair` code carries a random 16-byte token, valid once
+for 5 minutes. The phone checks the handshake proved the code's key, then
+sends PAIR_REQUEST with the token; the computer trusts the phone's key only
+for a valid token (PROTOCOL.md, "Pairing exchange").
+
+**Why:** SPEC.md 6.3 says the phone "sends its own key back over the
+authenticated session", but an authenticated session only proves who the
+phone is, not that it is the phone in front of the screen. Without a secret
+from the screen, anyone on the network who had seen an mDNS announcement
+could make the laptop trust them. One use and a short lifetime limit what a
+photographed code is worth.
+
+## 2026-10-28 — Kotlin API: one `BeamNode`, events through one listener
+
+**What:** core-ffi exposes a `BeamNode` object (UniFFI 0.32). Long operations
+are Kotlin `suspend` functions (`send`, `pair`); everything else (devices
+found and lost, offers, progress, results, pairing) arrives through a single
+`BeamListener` callback interface. Offers are answered later with
+`respondOffer`, and wait at most 60 seconds. The node owns its tokio runtime.
+
+**Why:** A suspend function per transfer would leave incoming transfers,
+which nobody "calls", without a place to report from; one listener covers
+both directions the same way. Keeping the runtime inside the node means no
+Kotlin call ever blocks on the network except `start` (binding a socket).
+
+## 2026-10-28 — Content URIs: file descriptors through the FFI
+
+**What:** The app opens each shared `content://` URI with
+`ContentResolver.openFileDescriptor`, detaches the descriptor and passes it
+to Rust as `FileSource.Fd`; core takes ownership and reads chunks with
+positional reads (`pread`). If the descriptor isn't seekable (a pipe from a
+cloud provider) or its size is unknown, the app copies the file to its cache
+first and passes that path instead. Core's sender now accepts any open file
+(`SendSource::open_file`) besides a path.
+
+**Why:**
+- Core sends with parallel streams, each reading chunks at arbitrary
+  offsets, and hashes the file before offering it. A stream through a
+  callback would serialize all of that, and add a JNI call per read.
+- Descriptors keep "read through `ContentResolver`, never raw paths"
+  (SPEC.md 8) without copying a 5 GB video before sending it.
+- Ownership moves to Rust at the call, so nothing has to agree on when to
+  close it; if one file in a batch fails to open, every descriptor already
+  handed over is still closed.
+
+## 2026-10-28 — Receive into app storage, then move to Download/Beam
+
+**What:** Incoming files are written to app-private storage
+(`filesDir/incoming`). When a transfer completes and every hash checks out,
+the app copies each file into `MediaStore.Downloads` under `Download/Beam`
+(with `IS_PENDING` while copying) and deletes the private copy.
+
+**Why:** The receiver needs positional writes from several streams, a
+`.beam-partial` manifest beside the file, and renames to resume after a
+dropped connection, and MediaStore URIs offer none of these. `filesDir`,
+not the cache, so Android doesn't delete half a transfer that is waiting to
+resume. The cost is one local copy per received file, after the transfer.
+
+## 2026-10-28 — Android discovery: NsdManager by default, core's mDNS as an option
+
+**What:** Both work, and Settings → "Finding devices" switches between them:
+- **Android (NsdManager)**, the default (SPEC.md 4.1). Core still decides
+  what to announce: with `Discovery.PLATFORM` the node tells the app what to
+  register (`advertisementChanged`, including every 15-minute change of the
+  trusted-only rotating id and the end of "everyone"), and the app passes
+  what NsdManager resolves back with `serviceFound`/`serviceLost`, where core
+  parses the TXT record, hides our own announcement and recognizes trusted
+  devices.
+- **Beam's own mDNS** (`mdns-sd`, as on the desktop), holding a Wi-Fi
+  `MulticastLock` while it runs.
+
+**Why:** PROMPTS.md asks to test both and document the choice, but there is
+no phone in this phase's setup, so neither could be tried on a device yet.
+NsdManager is the default because it is the system's own service: it shares
+one multicast socket with other apps, survives Wi-Fi changes, and needs no
+multicast lock, which costs battery. Core's mDNS is kept because some
+NsdManager versions are known to be unreliable (resolve failures before
+Android 14). The TXT format and rotating id stay in Rust either way, so the
+two can't drift apart. **To do on a device:** compare how fast each finds
+the laptop, and whether trusted-only devices are recognized, then revisit
+the default.
+
+## 2026-10-28 — Foreground service while Beam is on; locks only while busy
+
+**What:** `BeamService` (type `connectedDevice`) runs whenever the node runs,
+so the phone can receive with the app closed. Its notification shows who
+can see the phone, or the transfer's progress with Cancel. A
+`WIFI_MODE_FULL_LOW_LATENCY` Wi-Fi lock and a partial wake lock are taken
+when a transfer starts moving and released as soon as none is, including
+while a received transfer waits for its sender to reconnect. "Stop" in the
+notification stops receiving.
+
+**Why:** SPEC.md 8. Receiving can't wait for the user to open the app, and
+Android only lets a foreground service keep the network alive in the
+background. Holding the locks only during transfers keeps idle battery use
+to the service itself.
+
+## 2026-10-28 — Device key on Android: wrapped by an Android Keystore key
+
+**What:** The 64-byte identity secret is generated by core, encrypted with
+an AES-256-GCM key kept in Android Keystore, and stored in app-private
+`identity.bin`. Auto Backup is off, and the data extraction rules exclude
+everything from cloud backup and device-to-device transfer (Android 12+
+ignores `allowBackup` for the latter). If the Keystore key is gone, the app
+starts over as a new device.
+
+**Why:** Keystore can't hold an X25519 key that Rust can use, so it guards
+the key that encrypts it (SPEC.md 6: "Android Keystore-encrypted storage").
+With backup off, the identity never leaves the phone; a restored copy on
+another phone could otherwise impersonate it to every trusted laptop.

@@ -1,9 +1,9 @@
 # Beam wire protocol
 
-Status: **version 1.0, phase 5.** This covers encrypted transfers over one
-control connection plus parallel data connections, with resume, and
-discovery on the local network with mDNS. BLE discovery comes in a later
-phase.
+Status: **version 1.0, phase 6.** This covers encrypted transfers over one
+control connection plus parallel data connections, with resume, discovery
+on the local network with mDNS, and QR-code pairing. BLE discovery comes in
+a later phase.
 
 All integers on the wire are **big-endian**. "MB" means 1,000,000 bytes;
 "MiB" means 1,048,576 bytes.
@@ -164,7 +164,8 @@ frame         = type:u8 | body
 - Decoders **ignore unknown keys**, so a minor version can add fields.
 - The body must be exactly one CBOR item; trailing bytes are an error.
 - Byte strings: `uuid` = 16 bytes, `hash` = 32 bytes (BLAKE3),
-  `device_id` = 8 bytes, `token` = 32 bytes.
+  `device_id` = 8 bytes, `token` = 32 bytes (session token) or 16 bytes
+  (pairing token).
 - Unsigned integers are `uint`; `modified_unix` may be negative (`int`).
 
 Wire example: `PING {nonce: 1}` is the frame `0C A1 65 6E 6F 6E 63 65 01`
@@ -519,6 +520,34 @@ Defined now, used from phase 9.
 {"mime": "text/plain", "text": "hello from my phone"}
 ```
 
+### 0x11 PAIR_REQUEST (scanner → shower, control)
+
+The first frame after the handshake on a pairing connection, instead of
+HELLO. Sent only after the scanner has checked that the handshake proved the
+static key from the QR code (otherwise it closes without sending).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `token` | bytes (16) | The `token` parameter of the scanned code. |
+
+```
+{"token": h'09f3…(16 bytes)'}
+```
+
+### 0x12 PAIR_RESULT (shower → scanner, control)
+
+| Field | Type | Meaning |
+|---|---|---|
+| `accepted` | bool | The token was valid: the shower now trusts the scanner's key. |
+| `reason` | text | Why not, when `accepted` is false; otherwise empty. |
+
+```
+{"accepted": false, "reason": "this pairing code has expired; show a new one"}
+```
+
+Either way the shower then closes the connection. A transfer, if one
+follows, uses a new connection.
+
 ## Errors and closing
 
 - Protocol violations end the transfer: unknown frame types, malformed CBOR,
@@ -617,7 +646,7 @@ announcement says:
 The desktop app shows a QR code (SPEC.md 6.3) that encodes one link:
 
 ```
-beam://pair?v=1&id=<id>&key=<key>&name=<name>&addr=<addresses>
+beam://pair?v=1&id=<id>&key=<key>&name=<name>&addr=<addresses>&token=<token>
 ```
 
 | Parameter | Value |
@@ -627,16 +656,33 @@ beam://pair?v=1&id=<id>&key=<key>&name=<name>&addr=<addresses>
 | `key` | Static public key: 64 lowercase hex digits. A scanner must check that `id` is the first 8 bytes of SHA-256(`key`). |
 | `name` | Device name, percent-encoded (RFC 3986 unreserved characters are left as they are). |
 | `addr` | Comma-separated `ip:port` (IPv6 as `[ip]:port`), percent-encoded. Non-loopback, non-link-local addresses only, IPv4 first. |
+| `token` | One-time pairing token: 32 lowercase hex digits (16 random bytes). |
 
 Example:
 
 ```
-beam://pair?v=1&id=e430a9931d4673e6&key=4fe40cb5…5c5d&name=KARTIKAY&addr=172.16.144.19%3A9000
+beam://pair?v=1&id=e430a9931d4673e6&key=4fe40cb5…5c5d&name=KARTIKAY&addr=172.16.144.19%3A9000&token=09f3…77a1
 ```
 
+### Pairing exchange
+
 Scanning gives the phone the computer's full public key, so it can trust it
-directly. The phone sending its own key back over an authenticated session,
-making the trust mutual, is defined in phase 6.
+directly. To make the trust mutual:
+
+1. The phone connects to the first `addr` that answers and runs the usual
+   Noise XX handshake. If the computer's static key isn't the `key` from the
+   code, the phone stops: the address now belongs to someone else.
+2. The phone sends PAIR_REQUEST with the token.
+3. The computer accepts the token only if it is the one on screen, has not
+   been used, and is less than **5 minutes** old. The comparison is constant
+   time. Showing a new code invalidates the previous one.
+4. On success the computer trusts the phone's handshake-proven static key
+   (with auto-accept on) and answers PAIR_RESULT `accepted: true`; the phone
+   then trusts the computer (auto-accept on).
+
+The token is what lets the computer trust a key it has never seen: only
+someone who could see the screen has it. A device that only learned the
+code's id, key and addresses (from mDNS, say) cannot pair.
 
 ## Discovery (BLE advertisement and GATT)
 

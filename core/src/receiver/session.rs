@@ -20,7 +20,7 @@ use crate::connection::{Connection, ConnectionError};
 use crate::frame::Frame;
 use crate::messages::{
     Accept, Cancel, ChunkAck, ChunkRetry, FileDone, FileEntry, FileHave, Hash32, Hello, Offer,
-    Ping, Reject, TransferComplete, TransferStats,
+    PairRequest, PairResult, Ping, Reject, TransferComplete, TransferStats,
 };
 use crate::sanitize::{sanitize_file_name, unique_file_name};
 use crate::secure::HandshakeInfo;
@@ -29,6 +29,7 @@ use crate::transfer::{
     TransferError, TransferSummary, ACK_INTERVAL, CHECKPOINT_INTERVAL, CHUNK_SIZE,
     MAX_CHUNK_RETRIES, MAX_FILES_PER_OFFER, MAX_RAW_NAME_BYTES, PING_INTERVAL,
 };
+use crate::trust::TrustedDevice;
 use crate::visibility::VisibilityMode;
 
 /// How the background check of a finished file came out.
@@ -66,6 +67,9 @@ pub(super) async fn run_control(
         };
     let offer = match tokio::time::timeout(OFFER_TIMEOUT, conn.read_frame()).await {
         Ok(Ok(Frame::Offer(offer))) => offer,
+        Ok(Ok(Frame::PairRequest(request))) => {
+            return pair(conn, peer, request, &shared, handler.as_ref()).await
+        }
         Ok(Ok(other)) => {
             return handler.connection_refused(&TransferError::unexpected("OFFER", &other))
         }
@@ -217,6 +221,41 @@ async fn receive(
             }
             Err(err)
         }
+    }
+}
+
+/// Answers a PAIR_REQUEST: a valid, unused token from our pairing code means
+/// the sender scanned our screen, so its proven key becomes trusted.
+async fn pair(
+    mut conn: Connection<TcpStream>,
+    peer: PeerInfo,
+    request: PairRequest,
+    shared: &Shared,
+    handler: &dyn ReceiveHandler,
+) {
+    let accepted = shared.config.pairing.redeem(&request.token);
+    let result = if accepted {
+        shared
+            .config
+            .trust
+            .upsert(TrustedDevice::new(
+                peer.name().to_string(),
+                peer.public_key,
+                true,
+            ))
+            .map_err(|e| e.to_string())
+    } else {
+        Err("this pairing code has expired; show a new one".to_string())
+    };
+    let reply = PairResult {
+        accepted: result.is_ok(),
+        reason: result.clone().err().unwrap_or_default(),
+    };
+    let _ = conn.send(&Frame::PairResult(reply)).await;
+    let _ = conn.shutdown().await;
+    match result {
+        Ok(()) => handler.paired(&peer),
+        Err(reason) => handler.connection_refused(&TransferError::PairingRefused(reason)),
     }
 }
 

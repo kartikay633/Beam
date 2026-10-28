@@ -24,6 +24,8 @@ pub const TYPE_PING: u8 = 0x0C;
 pub const TYPE_PONG: u8 = 0x0D;
 pub const TYPE_CHUNK_RETRY: u8 = 0x0E;
 pub const TYPE_CLIPBOARD: u8 = 0x10;
+pub const TYPE_PAIR_REQUEST: u8 = 0x11;
+pub const TYPE_PAIR_RESULT: u8 = 0x12;
 
 /// Size of the DATA header after the type byte.
 pub const DATA_HEADER_LEN: usize = 4 + 8 + 4;
@@ -45,6 +47,8 @@ pub enum Frame {
     Pong(Ping),
     ChunkRetry(ChunkRetry),
     Clipboard(Clipboard),
+    PairRequest(PairRequest),
+    PairResult(PairResult),
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -83,6 +87,8 @@ impl Frame {
             Frame::Pong(_) => TYPE_PONG,
             Frame::ChunkRetry(_) => TYPE_CHUNK_RETRY,
             Frame::Clipboard(_) => TYPE_CLIPBOARD,
+            Frame::PairRequest(_) => TYPE_PAIR_REQUEST,
+            Frame::PairResult(_) => TYPE_PAIR_RESULT,
         }
     }
 
@@ -104,6 +110,8 @@ impl Frame {
             Frame::Pong(_) => "PONG",
             Frame::ChunkRetry(_) => "CHUNK_RETRY",
             Frame::Clipboard(_) => "CLIPBOARD",
+            Frame::PairRequest(_) => "PAIR_REQUEST",
+            Frame::PairResult(_) => "PAIR_RESULT",
         }
     }
 
@@ -127,6 +135,8 @@ impl Frame {
             Frame::Ping(m) | Frame::Pong(m) => encode_cbor(m, out),
             Frame::ChunkRetry(m) => encode_cbor(m, out),
             Frame::Clipboard(m) => encode_cbor(m, out),
+            Frame::PairRequest(m) => encode_cbor(m, out),
+            Frame::PairResult(m) => encode_cbor(m, out),
             Frame::Data(_) => unreachable!("handled above"),
         }
         Ok(())
@@ -156,6 +166,8 @@ impl Frame {
             TYPE_PONG => Frame::Pong(decode_cbor(frame_type, body)?),
             TYPE_CHUNK_RETRY => Frame::ChunkRetry(decode_cbor(frame_type, body)?),
             TYPE_CLIPBOARD => Frame::Clipboard(decode_cbor(frame_type, body)?),
+            TYPE_PAIR_REQUEST => Frame::PairRequest(decode_cbor(frame_type, body)?),
+            TYPE_PAIR_RESULT => Frame::PairResult(decode_cbor(frame_type, body)?),
             other => return Err(FrameError::UnknownType(other)),
         })
     }

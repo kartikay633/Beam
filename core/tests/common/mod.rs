@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use beam_core::{
-    BoxFuture, Decision, DeviceType, Identity, IncomingOffer, LocalDevice, Progress,
+    BoxFuture, Decision, DeviceType, Identity, IncomingOffer, LocalDevice, PairingWindow, Progress,
     ReceiveHandler, ReceiveOutcome, Receiver, ReceiverConfig, ReceiverHandle, TransferError,
     TransferSummary, TrustStore, TrustedDevice, Visibility, VisibilityMode,
 };
@@ -154,6 +154,8 @@ impl ReceiveHandler for TestHandler {
 /// connections.
 pub struct TestReceiver {
     pub addr: SocketAddr,
+    /// Open it to accept a pairing request.
+    pub pairing: PairingWindow,
     pub handle: ReceiverHandle,
     pub progress: Arc<AtomicU64>,
     /// The transfer id of the most recently accepted offer.
@@ -181,6 +183,7 @@ impl TestReceiver {
         visibility: Visibility,
         decide: impl Fn(&IncomingOffer) -> Decision + Send + Sync + 'static,
     ) -> TestReceiver {
+        let pairing = PairingWindow::default();
         let receiver = Receiver::bind(
             "127.0.0.1:0",
             ReceiverConfig {
@@ -188,6 +191,7 @@ impl TestReceiver {
                 download_dir: download_dir.to_path_buf(),
                 trust,
                 visibility,
+                pairing: pairing.clone(),
             },
         )
         .await
@@ -207,6 +211,7 @@ impl TestReceiver {
         }));
         TestReceiver {
             addr,
+            pairing,
             handle,
             progress,
             last_accepted,
