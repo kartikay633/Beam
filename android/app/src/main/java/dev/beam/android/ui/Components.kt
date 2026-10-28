@@ -4,7 +4,20 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import androidx.core.net.toUri
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.unit.Dp
+import dev.beam.android.R
+import dev.beam.android.ui.theme.Ink
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -42,8 +55,31 @@ fun SectionTitle(text: String, modifier: Modifier = Modifier) {
     Text(
         text,
         style = MaterialTheme.typography.titleSmall,
-        color = MaterialTheme.colorScheme.primary,
-        modifier = modifier.padding(top = 20.dp, bottom = 8.dp),
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = modifier.padding(top = 24.dp, bottom = 8.dp),
+    )
+}
+
+/** The Beam logo: the mark on an ink square, as on the launcher icon. */
+@Composable
+fun BeamLogo(size: Dp = 28.dp) {
+    Box(
+        Modifier.size(size).clip(RoundedCornerShape(size * 0.225f)).background(Ink),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(painterResource(R.drawable.ic_notification), null, tint = Color.White, modifier = Modifier.size(size * 0.7f))
+    }
+}
+
+/** A flat card: white (or raised dark) surface with a hairline border. */
+@Composable
+fun BeamCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
+    Card(
+        modifier = modifier,
+        shape = RoundedCornerShape(10.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        content = content,
     )
 }
 
@@ -51,8 +87,9 @@ fun SectionTitle(text: String, modifier: Modifier = Modifier) {
 @Composable
 fun Banner(text: String, action: String? = null, error: Boolean = false, onAction: () -> Unit = {}) {
     Card(
+        shape = RoundedCornerShape(10.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (error) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.secondaryContainer,
+            containerColor = if (error) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
         ),
         modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
     ) {
@@ -66,7 +103,7 @@ fun Banner(text: String, action: String? = null, error: Boolean = false, onActio
 @Composable
 fun TransferCard(t: TransferUi, onCancel: () -> Unit) {
     val context = LocalContext.current
-    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+    BeamCard(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Column(Modifier.padding(16.dp)) {
             Text(
                 "${if (t.sending) "To" else "From"} ${t.peerName}",

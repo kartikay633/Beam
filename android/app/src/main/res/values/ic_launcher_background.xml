@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-  <color name="ic_launcher_background">#FFFFFF</color>
+    <!-- Ink, the logo's background (assets/brand/logo.svg). -->
+    <color name="ic_launcher_background">#14171C</color>
 </resources>

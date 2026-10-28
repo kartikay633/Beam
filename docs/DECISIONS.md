@@ -705,3 +705,61 @@ starts over as a new device.
 the key that encrypts it (SPEC.md 6: "Android Keystore-encrypted storage").
 With backup off, the identity never leaves the phone; a restored copy on
 another phone could otherwise impersonate it to every trusted laptop.
+
+## 2026-10-29 — Phase 7 scope: discovery and a working offline link
+
+**What:** Phase 7 now covers BLE discovery (the original Phase 7) *and* the
+Android local-only hotspot link (step 1 of the original Phase 8), so that
+Phase 7 ends with a real transfer between devices that share no network.
+Wi-Fi Direct and the full link negotiation stay in Phase 8. Alongside: the
+Microsoft Store package, a cleaner UI on both apps, and a new logo.
+
+**Why:** The user's priority after Phase 6: what sets Beam apart is working
+with no shared Wi-Fi network, router or internet, the way AirDrop does.
+Discovery alone shows a device you still can't send to.
+
+## 2026-10-29 — BLE: no identity in trusted-only mode, even over GATT
+
+**What:** In trusted-only mode the advertisement carries the rotating id
+(not a device id prefix), the scan response has no name, and `INFO` leaves
+out the name and fingerprint. SPEC.md 4.2 lists the rotating id as a
+stretch goal and always puts name and fingerprint in `INFO`.
+
+**Why:** Otherwise anyone could follow a phone around by its BLE broadcasts,
+or simply connect and read `INFO` to learn who it is, defeating trusted-only
+mode. The rotating id already existed for mDNS, so BLE reuses it (its first
+6 bytes). A sender that trusts the device already knows its key, and Noise
+proves it afterwards.
+
+## 2026-10-29 — Desktop distribution through the Microsoft Store
+
+**What:** The main way to install the desktop app will be the Microsoft
+Store (an MSIX package, signed by the Store). The unsigned `.msi` on GitHub
+stays as a secondary download.
+
+**Why:** Unsigned installers make Windows SmartScreen say the app "may be
+harmful", and testers won't get past that. Signing is the only fix. Store
+registration is free for individual developers, and the Store signs the
+package, hosts it and updates it. Azure code signing for individuals is
+limited to the USA and Canada.
+
+## 2026-10-29 — Logo and visual style: neutral, one ink accent
+
+**What:**
+- **Logo:** two points joined by a beam, white on a rounded ink (`#14171C`)
+  square. Sources are in `assets/brand/` (`logo.svg`, `mark.svg`, and
+  `render.py`, which draws the 1024 px PNG that `npx tauri icon` turns into
+  every desktop icon).
+- **Android:** the launcher icon is an adaptive vector icon with a
+  monochrome layer for themed icons; the notification icon is the same mark.
+- **UI style:** both apps share one palette: neutral greys, ink as the only
+  accent (it inverts to near-white in dark mode), green, amber and red only
+  for status, hairline borders instead of shadows, and no gradients.
+- **Android colour:** the app sets every Material 3 colour role and doesn't
+  use dynamic colour.
+
+**Why:** Testers found the Phase 5–6 look (blue-to-purple gradients, tinted
+panels) generic and "AI-made". A product asking for trust, and headed for the
+Microsoft Store, should look calm and deliberate. Material 3's defaults are
+purple and dynamic colour follows the wallpaper, so leaving any role unset
+brings the purple back.

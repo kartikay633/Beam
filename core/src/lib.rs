@@ -2,6 +2,7 @@
 //! transfer engine, shared by the CLI, the desktop app and the Android app.
 
 pub mod bitmap;
+pub mod ble;
 pub mod connection;
 pub mod discovery;
 pub mod frame;

@@ -5,7 +5,7 @@ import { PairPage } from "./Pair";
 import { SettingsPage } from "./SettingsPage";
 import { TrustedPage } from "./Trusted";
 import { formatDuration } from "./format";
-import { GearIcon, HomeIcon, QrIcon, ShieldIcon } from "./icons";
+import { BeamLogo, GearIcon, HomeIcon, QrIcon, ShieldIcon } from "./icons";
 
 type Page = "home" | "trusted" | "pair" | "settings";
 
@@ -39,7 +39,7 @@ export function App() {
     <div className="app">
       <aside className="sidebar">
         <div className="brand">
-          <img src="/logo.png" alt="" width={28} height={28} />
+          <BeamLogo size={26} />
           <span>Beam</span>
           {!isTauri && <span className="demo-badge">demo</span>}
         </div>

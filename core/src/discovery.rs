@@ -227,7 +227,7 @@ impl Announcement {
     }
 }
 
-fn truncate(s: &str, max_bytes: usize) -> &str {
+pub(crate) fn truncate(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
     }

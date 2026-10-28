@@ -686,4 +686,83 @@ code's id, key and addresses (from mDNS, say) cannot pair.
 
 ## Discovery (BLE advertisement and GATT)
 
-To be written in phase 7.
+Bluetooth LE lets two devices find each other and agree on a Wi-Fi link
+when they share no network. Implemented in `core/src/ble.rs`; the radios are
+platform code. Status: format and crypto done and tested (phase 7a); the
+Android and Windows radio code comes next.
+
+### UUIDs
+
+| What | UUID |
+|---|---|
+| Service (and advertisement service data) | `af59893f-ddbd-4717-96b0-c74e6ab25e2b` |
+| `INFO` (read) | `af59893f-ddbd-4717-96b0-c74e6ab25e2c` |
+| `CONNECT_REQUEST` (write) | `af59893f-ddbd-4717-96b0-c74e6ab25e2d` |
+| `CONNECT_RESPONSE` (notify) | `af59893f-ddbd-4717-96b0-c74e6ab25e2e` |
+
+### Advertisement
+
+Legacy advertising. Service data for the service UUID, 10 bytes:
+
+| Byte | Field |
+|---|---|
+| 0 | Version, `1`. Anything else is ignored. |
+| 1 | Device type: `0` phone, `1` laptop. |
+| 2–7 | Id: the first 6 bytes of the device id, or of the rotating id (see flags). |
+| 8 | Flags: bit0 accepting, bit1 on a LAN, bit2 Wi-Fi Direct capable, bit3 hotspot capable, bit4 the id is the rotating id. |
+| 9 | Reserved, `0`. |
+
+- **Everyone:** id = device id prefix; the scan response carries the device
+  name, cut to 29 bytes at a character boundary.
+- **Trusted only:** id = the first 6 bytes of the mDNS rotating id for the
+  current 15-minute window (see "Rotating identifier"), bit4 set, no name. A
+  scanner that trusts the device matches it against the windows before,
+  during and after now; anyone else ignores it.
+- **Off:** no advertisement.
+
+A scanner hides its own advertisement. An everyone-mode device it doesn't
+trust is shown by its scan-response name; its full id is known only after
+reading `INFO`.
+
+### GATT handshake
+
+The **receiver** hosts the service; the **sender** connects, asks for an
+MTU of 517, and:
+
+1. Reads `INFO`: CBOR `{v, name?, type, fingerprint?, caps, eph}`. `eph` is a
+   32-byte X25519 public key, fresh for every GATT connection. `name` and
+   `fingerprint` (the 8-byte device id) are left out in trusted-only mode,
+   so connecting to a trusted-only device reveals nothing to a stranger.
+2. Writes `CONNECT_REQUEST`: its own fresh ephemeral X25519 public key
+   (32 bytes, in the clear), then the sealed CBOR
+   `{caps, links, lan, hotspot?}`: capability bits, the links it can use,
+   best first (`"lan"`, `"hotspot"`, `"wifi_direct"`), its LAN IP addresses,
+   and `{ssid, passphrase}` if it is hosting a hotspot for this transfer.
+3. Gets `CONNECT_RESPONSE` as a notification: the sealed CBOR
+   `{link?, addr?, hotspot?, reason?}`: the chosen link and the `ip:port` to
+   connect to, the receiver's hotspot if it hosts one, or no link and a
+   reason.
+
+Then the sender opens the chosen link and runs the normal Noise XX handshake
+and transfer. That handshake, not this one, authenticates both devices.
+
+**Sealing:**
+
+```
+shared   = X25519(own ephemeral secret, peer ephemeral public)   (refused if all-zero)
+okm      = HKDF-SHA256(salt = "beam 2026-10-29 ble handshake v1",
+                       ikm  = shared,
+                       info = sender eph ‖ receiver eph, length 64)
+k_req    = okm[0..32]    k_resp = okm[32..64]
+request  = ChaCha20-Poly1305(k_req,  nonce = 0, aad = "beam connect request",  CBOR)
+response = ChaCha20-Poly1305(k_resp, nonce = 0, aad = "beam connect response", CBOR)
+```
+
+Each key seals exactly one message, so the all-zero nonce is never reused.
+
+### Fragments
+
+A value longer than one ATT write or notification is split: each fragment is
+`[index, count] ‖ chunk`, at most MTU − 3 bytes. Fragments may arrive in any
+order; a repeat replaces the earlier copy; a reassembled value is at most
+4096 bytes.

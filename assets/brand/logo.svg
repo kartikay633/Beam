@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="Beam">
+  <!-- App icon: the mark in white on a rounded ink square. -->
+  <rect width="100" height="100" rx="22.5" fill="#14171C"/>
+  <g transform="translate(15 15) scale(0.7)" fill="#FFFFFF">
+    <circle cx="24" cy="50" r="13"/>
+    <circle cx="76" cy="50" r="13"/>
+    <rect x="24" y="45" width="52" height="10"/>
+  </g>
+</svg>

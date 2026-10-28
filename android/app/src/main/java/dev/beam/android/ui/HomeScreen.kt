@@ -18,7 +18,6 @@ import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
@@ -70,6 +69,19 @@ fun HomeScreen(
     val pick = { picker.launch(arrayOf("*/*")) }
 
     LazyColumn(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 16.dp)) {
+                BeamLogo(28.dp)
+                Text("Beam", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(start = 10.dp).weight(1f))
+                Text(
+                    state.deviceName,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
         item { VisibilityCard(state, vm::setVisibility) }
         item { notificationBanner() }
         state.error?.let { error ->
@@ -115,7 +127,7 @@ fun HomeScreen(
         item { SectionTitle("Nearby") }
         if (state.nearby.isEmpty()) {
             item {
-                Card(Modifier.fillMaxWidth()) {
+                BeamCard(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
                             if (state.running) "Looking for devices on this Wi-Fi…" else "Beam isn't running.",

@@ -159,14 +159,14 @@ function DeviceCard({ device, ready, onSend }: { device: Device; ready: boolean;
   const icon =
     device.kind === "phone" ? <PhoneIcon size={26} /> : device.kind === "laptop" ? <LaptopIcon size={26} /> : <DeviceIcon size={26} />;
   return (
-    <div className="device-card">
+    <div className="device-card" title={device.deviceId}>
       <div className="device-avatar">{icon}</div>
       <div className="device-info">
-        <div className="device-name">
-          {device.name}
-          {device.trusted && <span className="badge trusted">Trusted</span>}
+        <div className="device-name">{device.name}</div>
+        <div className="muted small">
+          {device.kind === "phone" ? "Phone" : device.kind === "laptop" ? "Computer" : "Device"}
+          {device.trusted ? " · Trusted" : ""}
         </div>
-        <div className="muted small mono">{device.deviceId}</div>
       </div>
       <button
         className="primary"

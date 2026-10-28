@@ -22,6 +22,18 @@ function Icon({ children, size = 20 }: { children: ReactNode; size?: number }) {
 
 type P = { size?: number };
 
+/** The Beam logo: the mark (two points joined by a beam) on an ink square. */
+export const BeamLogo = ({ size = 28 }: P) => (
+  <svg width={size} height={size} viewBox="0 0 100 100" aria-hidden="true">
+    <rect width="100" height="100" rx="22.5" fill="#14171C" />
+    <g transform="translate(15 15) scale(0.7)" fill="#FFFFFF">
+      <circle cx="24" cy="50" r="13" />
+      <circle cx="76" cy="50" r="13" />
+      <rect x="24" y="45" width="52" height="10" />
+    </g>
+  </svg>
+);
+
 export const LaptopIcon = (p: P) => (
   <Icon {...p}>
     <rect x="4" y="5" width="16" height="11" rx="1.5" />

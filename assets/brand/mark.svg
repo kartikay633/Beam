@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="Beam">
+  <!-- The mark alone, in the current text colour: two points joined by a beam. -->
+  <g fill="currentColor">
+    <circle cx="24" cy="50" r="13"/>
+    <circle cx="76" cy="50" r="13"/>
+    <rect x="24" y="45" width="52" height="10"/>
+  </g>
+</svg>
