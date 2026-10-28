@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Lets phones connect in on every network profile. When the laptop joins a
+  phone's hotspot (no shared Wi-Fi), Windows classifies it as a public
+  network, and the exception Windows offers on first run usually covers
+  private networks only. The Store package declares the same rule in its
+  manifest (desktop/msix/AppxManifest.xml).
+
+  [#Path] is the main executable: Tauri's template names its File "Path".
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="BeamFirewall" Guid="057137a2-063f-4ad5-9e57-eba348c83613" Win64="yes">
+        <RegistryValue Root="HKLM" Key="Software\Beam" Name="FirewallRule" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <CustomAction
+      Id="BeamFirewallAdd"
+      Directory="INSTALLDIR"
+      Execute="deferred"
+      Impersonate="no"
+      Return="ignore"
+      ExeCommand='"[System64Folder]netsh.exe" advfirewall firewall add rule name="Beam" dir=in action=allow program="[#Path]" enable=yes profile=any' />
+    <CustomAction
+      Id="BeamFirewallRemove"
+      Directory="INSTALLDIR"
+      Execute="deferred"
+      Impersonate="no"
+      Return="ignore"
+      ExeCommand='"[System64Folder]netsh.exe" advfirewall firewall delete rule name="Beam" program="[#Path]"' />
+
+    <InstallExecuteSequence>
+      <Custom Action="BeamFirewallRemove" Before="RemoveFiles">REMOVE="ALL"</Custom>
+      <Custom Action="BeamFirewallAdd" After="InstallFiles">NOT Installed</Custom>
+    </InstallExecuteSequence>
+  </Fragment>
+</Wix>

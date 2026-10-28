@@ -138,3 +138,45 @@ Bugs that took more than an hour to fix. For each one: symptom, root cause, fix.
 - **Fix:** Pass the `TestScope` itself; `runTest` then also waits for that
   work before finishing.
 - **Phase:** 6
+
+## `GattServiceProvider` advertising aborted; a plain publisher worked
+
+- **Symptom:** On the laptop, `GattServiceProvider.StartAdvertisingWithParameters`
+  succeeded, but `AdvertisementStatus` was `Aborted` (3) a moment later,
+  and the status-changed event said `Aborted` with error `Success`. The
+  service and its three characteristics were created fine.
+- **Root cause:** Unknown inside Windows. Ruled out by hardware tests
+  (`cargo test -p beam-desktop -- --ignored`):
+  - payload size: it aborts with no service data at all;
+  - the connectable/discoverable flags: every combination aborts;
+  - the radio: on the same Intel AX201, a plain
+    `BluetoothLEAdvertisementPublisher` with the same service data reported
+    `Started`, and the watcher heard ~50 advertisements in 3 s.
+- **Fix:** Windows never hosts the GATT service. It advertises with the
+  publisher and acts only as a GATT client; a phone that wants to send to it
+  "calls" it instead (DECISIONS.md). Hardware smoke tests stay in the repo.
+  Lesson: test each platform radio API on real hardware before building a
+  protocol on it.
+- **Phase:** 7
+
+## Kotlin: `fun f() = synchronized(lock) { … runCatching { … } }` returns `Result`
+
+- **Symptom:** "Return type mismatch: expected 'Result<Unit>', actual
+  'Unit'" at an early `return` inside the `synchronized` block.
+- **Root cause:** An expression-bodied function takes its type from the
+  block's last expression, here `runCatching { … }`, so the function
+  returned `Result<Unit>` and a bare `return` no longer matched.
+- **Fix:** Declare `: Unit` and end the block with `Unit`, or use a block
+  body.
+- **Phase:** 7
+
+## Android 13's Bluetooth write calls return `BluetoothStatusCodes`
+
+- **Symptom:** Lint error *WrongConstant* on
+  `gatt.writeCharacteristic(c, value, type) == BluetoothGatt.GATT_SUCCESS`.
+- **Root cause:** The Android 13 overloads (`writeCharacteristic`,
+  `writeDescriptor`, `notifyCharacteristicChanged`) return
+  `BluetoothStatusCodes`, not GATT status codes. Both happen to use 0 for
+  success, so it worked by accident.
+- **Fix:** Compare with `BluetoothStatusCodes.SUCCESS`.
+- **Phase:** 7

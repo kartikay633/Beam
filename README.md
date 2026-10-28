@@ -5,8 +5,20 @@ sharing that works even with no shared Wi-Fi network and no internet.
 
 > **Status: in development.** Phone ↔ laptop transfers work on the same
 > Wi-Fi network (the Android app, the Windows app and the CLI). Transfers
-> with no shared network come next. Follow progress in
-> [docs/SPEC.md](docs/SPEC.md).
+> with **no shared network** (Bluetooth to find each other, the phone's
+> private hotspot to transfer) are built and being tested on real devices.
+> Follow progress in [docs/SPEC.md](docs/SPEC.md).
+
+## What makes it different
+
+- **No shared network needed.** On a train or anywhere without Wi-Fi in
+  common: Beam finds the other device over Bluetooth LE, then the phone
+  opens a private Wi-Fi link just for the transfer. There's no pairing in
+  Bluetooth settings and nothing to join by hand.
+- **Two taps from the share sheet.** Your trusted laptop appears directly
+  in Android's share sheet: share, tap the laptop, done.
+- **End-to-end encrypted and verified.** Noise XX with device keys, a
+  6-digit code to compare, and resume after a dropped connection.
 
 ## Repository layout
 
@@ -37,10 +49,12 @@ npm install
 npm run tauri dev
 ```
 
-It sits in the tray, shows nearby devices, takes files by drag-and-drop or
-Explorer's **Send to → Beam**, and asks before accepting anything (an
-always-on-top popup with the verification code). It works with the CLI and
-with other copies of the app. See [desktop/README.md](desktop/README.md).
+It sits in the tray, shows nearby devices (on the network, or over Bluetooth
+when you share no network), takes files by drag-and-drop or Explorer's
+**Send to → Beam**, and asks before accepting anything (an always-on-top
+popup with the verification code). It works with the CLI and with other
+copies of the app. See [desktop/README.md](desktop/README.md). Store
+packaging is in [desktop/msix](desktop/msix/README.md).
 
 ## Android app
 
@@ -55,10 +69,12 @@ It needs the Android SDK and NDK, JDK 21 and `cargo-ndk`: see
 [android/README.md](android/README.md).
 
 Share photos or files to **Beam** from any app (or pick them in Beam), then
-tap a nearby device. Received files go to `Download/Beam`. To pair with the
-desktop app, open **Pair a phone** on the laptop and scan its QR code from
-**Devices → Pair with a laptop**; the two then trust each other and can find
-each other in "trusted only" mode.
+tap a nearby device. Trusted devices also appear directly in the share
+sheet. Received files go to `Download/Beam`. To pair with the desktop app,
+open **Pair a phone** on the laptop and scan its QR code from **Devices →
+Pair with a laptop**; the two then trust each other and can find each other
+in "trusted only" mode. Allow **Nearby devices** when Beam asks, so it can
+also find devices over Bluetooth when you're not on the same Wi-Fi.
 
 ## Trying it from the command line (same network)
 

@@ -84,6 +84,18 @@ jobs:
           path: target/release/bundle/msi/*.msi
           if-no-files-found: error
 
+      # Placeholder identity: checks the Store package still builds. The
+      # real one is packed with the Partner Center identity (msix/README.md).
+      - name: Package for the Microsoft Store (.msix)
+        shell: pwsh
+        run: ./msix/build-msix.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: beam-windows-msix
+          path: target/msix/*.msix
+          if-no-files-found: error
+
   android:
     name: Android app (ubuntu-latest)
     runs-on: ubuntu-latest

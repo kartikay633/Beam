@@ -688,8 +688,8 @@ code's id, key and addresses (from mDNS, say) cannot pair.
 
 Bluetooth LE lets two devices find each other and agree on a Wi-Fi link
 when they share no network. Implemented in `core/src/ble.rs`; the radios are
-platform code. Status: format and crypto done and tested (phase 7a); the
-Android and Windows radio code comes next.
+platform code: Android hosts the GATT service and scans; Windows scans,
+advertises and acts as a GATT client only (see "Calls").
 
 ### UUIDs
 
@@ -709,7 +709,7 @@ Legacy advertising. Service data for the service UUID, 10 bytes:
 | 0 | Version, `1`. Anything else is ignored. |
 | 1 | Device type: `0` phone, `1` laptop. |
 | 2–7 | Id: the first 6 bytes of the device id, or of the rotating id (see flags). |
-| 8 | Flags: bit0 accepting, bit1 on a LAN, bit2 Wi-Fi Direct capable, bit3 hotspot capable, bit4 the id is the rotating id. |
+| 8 | Flags: bit0 accepting, bit1 on a LAN, bit2 Wi-Fi Direct capable, bit3 hotspot capable, bit4 the id is the rotating id, bit5 a call (see "Calls"). |
 | 9 | Reserved, `0`. |
 
 - **Everyone:** id = device id prefix; the scan response carries the device
@@ -735,9 +735,11 @@ MTU of 517, and:
    so connecting to a trusted-only device reveals nothing to a stranger.
 2. Writes `CONNECT_REQUEST`: its own fresh ephemeral X25519 public key
    (32 bytes, in the clear), then the sealed CBOR
-   `{caps, links, lan, hotspot?}`: capability bits, the links it can use,
-   best first (`"lan"`, `"hotspot"`, `"wifi_direct"`), its LAN IP addresses,
-   and `{ssid, passphrase}` if it is hosting a hotspot for this transfer.
+   `{caps, links, lan, hotspot?, port?}`: capability bits, the links it can
+   use, best first (`"lan"`, `"hotspot"`, `"wifi_direct"`), its LAN IP
+   addresses, `{ssid, passphrase}` if it is hosting a hotspot for this
+   transfer, and, when the writer was *called* and will receive, the TCP
+   port it receives on.
 3. Gets `CONNECT_RESPONSE` as a notification: the sealed CBOR
    `{link?, addr?, hotspot?, reason?}`: the chosen link and the `ip:port` to
    connect to, the receiver's hotspot if it hosts one, or no link and a
@@ -759,6 +761,34 @@ response = ChaCha20-Poly1305(k_resp, nonce = 0, aad = "beam connect response", C
 ```
 
 Each key seals exactly one message, so the all-zero nonce is never reused.
+
+### Calls
+
+Windows can't reliably host the GATT service (DECISIONS.md), so a phone
+that wants to send to a laptop asks the laptop to connect to *it*:
+
+1. The phone starts its hotspot, then advertises a second, connectable
+   **call** advertisement next to its usual one: the same 10-byte layout
+   with bit5 set, and as the id the 6-byte id the laptop advertises (its
+   device id prefix, or its current rotating id).
+2. A laptop that hears a call naming one of its own ids (the windows
+   before, during and after now) connects to that phone's GATT service and
+   writes a `CONNECT_REQUEST` with `port` set to its receiving port.
+3. The phone answers:
+   - same LAN: `{link: "lan"}`, and sends to the laptop's LAN address and
+     `port` once the response is out;
+   - otherwise `{link: "hotspot", hotspot, addr: "<phone ip>:47813"}`
+     (`0.0.0.0` when the phone can't tell its own address on the hotspot:
+     use the hotspot's gateway).
+4. The laptop joins the hotspot and sends **hellos** over UDP to that
+   address every 500 ms until the transfer arrives: the 8 ASCII bytes
+   `BEAMHI01`, its 8-byte device id, and its receiving port as a big-endian
+   u16 (18 bytes). The phone sends to the source address of the first
+   hello, on that port, and expects that device id in the Noise handshake.
+
+The hello is a hint like an mDNS answer: only devices on the phone's
+hotspot (who know its password) can send one, and Noise proves who
+answers.
 
 ### Fragments
 

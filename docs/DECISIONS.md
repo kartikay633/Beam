@@ -763,3 +763,56 @@ panels) generic and "AI-made". A product asking for trust, and headed for the
 Microsoft Store, should look calm and deliberate. Material 3's defaults are
 purple and dynamic colour follows the wallpaper, so leaving any role unset
 brings the purple back.
+
+## 2026-10-29 — Windows doesn't host the Beam GATT service; phones call laptops
+
+**What:** Only Android hosts the GATT service (`INFO`, `CONNECT_REQUEST`,
+`CONNECT_RESPONSE`). The Windows app advertises with a plain
+`BluetoothLEAdvertisementPublisher`, scans, and is always the GATT
+*client*:
+- **Laptop → phone:** the laptop connects to the phone and asks for a link
+  (SPEC.md 4.2 as written).
+- **Phone → laptop:** the phone *calls* the laptop: an advertisement
+  naming it. The laptop connects back, joins the hotspot the phone offers,
+  and sends a UDP hello with its receiving port (PROTOCOL.md, "Calls").
+
+**Why:** Tested on this machine's Intel AX201: advertising through
+`GattServiceProvider` ended in status `Aborted` (error `Success`) every
+time, with or without service data and in every connectable/discoverable
+combination, while a plain publisher on the same adapter reported
+`Started` and the watcher heard dozens of advertisements a second.
+Reports of the same failure exist with no fix (see LEARNINGS.md). Rather
+than depend on a role some laptops can't play, every laptop plays the one
+that works, the central role. A C# helper (SPEC.md's plan B) would call
+the same failing API.
+
+## 2026-10-29 — Direct Share: trusted devices in the Android share sheet
+
+**What:** Every trusted device is a dynamic sharing shortcut in the
+`dev.beam.android.category.SEND_TO_DEVICE` category, so Android's share
+sheet lists "ThinkPad" directly. Sharing to it opens Beam, waits up to 20 s
+for that device to be nearby (network or Bluetooth), and sends without
+asking anything else. Recently used devices rank higher.
+
+**Why:** The bar is "faster than sending it to yourself on Telegram". With
+auto-accept on the laptop, phone → laptop becomes share → tap the laptop:
+two taps and no app to open, with nothing to download on the other side.
+
+## 2026-10-29 — Store package: firewall rules and no write virtualization
+
+**What:** The MSIX (desktop/msix) declares inbound TCP and UDP firewall
+rules for every network profile, and turns off file-system and registry
+write virtualization (`unvirtualizedResources`).
+
+**Why:**
+- **Firewall:** when the laptop joins a phone's hotspot, Windows classifies
+  it as a public network, and the exception Windows asks for on first run
+  usually covers private networks only, so phones couldn't connect in. A
+  packaged app can declare its rules at install time. The `.msi` does the
+  same with a WiX fragment (`src-tauri/wix/firewall.wxs`): a deferred
+  custom action runs `netsh` to add a rule for Beam's executable on every
+  profile, and removes it on uninstall. The MSI already installs
+  per-machine, elevated, so this adds no prompt.
+- **Virtualization:** the "Send to → Beam" shortcut and the start-with-
+  Windows entry must be visible to Explorer and Windows. Under MSIX they'd
+  be written into the package's private copy of AppData and HKCU instead.
