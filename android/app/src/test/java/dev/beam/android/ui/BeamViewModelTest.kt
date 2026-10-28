@@ -16,6 +16,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -121,6 +122,30 @@ class BeamViewModelTest {
         assertTrue("stop" in first.calls)
         assertTrue(node !== first)
         assertEquals("Kartikay's Pixel", settings.deviceName)
+    }
+
+    @Test
+    fun aDirectShareSendsOnceItsDeviceShowsUp() = runTest(dispatcher) {
+        val (vm, repo) = viewModel()
+        repo.start()
+        vm.stageAndSendTo(listOf("content://a"), laptop.deviceId)
+        advanceTimeBy(5_000)
+        assertTrue("nothing to send to yet", node.sent.isEmpty())
+        node.listener.deviceFound(laptop)
+        advanceUntilIdle()
+        assertEquals(laptop.deviceId, node.sent.single().first)
+        assertTrue(vm.staged.value.isEmpty())
+    }
+
+    @Test
+    fun aDirectShareToAnAbsentDeviceLeavesTheFilesStaged() = runTest(dispatcher) {
+        val (vm, repo) = viewModel()
+        repo.start()
+        vm.stageAndSendTo(listOf("content://a"), laptop.deviceId)
+        advanceTimeBy(BeamViewModel.DIRECT_SHARE_WAIT_MS + 1_000)
+        assertTrue(node.sent.isEmpty())
+        assertEquals(listOf("a"), vm.staged.value.map { it.name })
+        assertEquals("That device isn't nearby. Pick a device below.", repo.state.value.message)
     }
 
     class FakeFiles : FileAccess {

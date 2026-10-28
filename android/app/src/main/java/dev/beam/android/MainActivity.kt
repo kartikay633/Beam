@@ -10,6 +10,7 @@ import androidx.activity.viewModels
 import androidx.core.content.IntentCompat
 import androidx.lifecycle.lifecycleScope
 import dev.beam.android.service.BeamService
+import dev.beam.android.share.DirectShare
 import dev.beam.android.ui.BeamScreen
 import dev.beam.android.ui.BeamViewModel
 import dev.beam.android.ui.theme.BeamTheme
@@ -40,9 +41,14 @@ class MainActivity : ComponentActivity() {
         handleShare(intent)
     }
 
-    /** ACTION_SEND / ACTION_SEND_MULTIPLE from another app's share sheet. */
+    /**
+     * ACTION_SEND / ACTION_SEND_MULTIPLE from another app's share sheet. A
+     * share to a Direct Share target (a trusted device) goes straight to it.
+     */
     private fun handleShare(intent: Intent?) {
-        vm.stage(sharedUris(intent).map { it.toString() })
+        val uris = sharedUris(intent).map { it.toString() }
+        val target = DirectShare.deviceId(intent)
+        if (target != null) vm.stageAndSendTo(uris, target) else vm.stage(uris)
     }
 
     companion object {

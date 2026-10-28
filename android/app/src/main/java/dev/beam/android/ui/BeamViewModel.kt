@@ -12,6 +12,7 @@ import dev.beam.android.data.DiscoveryChoice
 import dev.beam.android.data.FileAccess
 import dev.beam.android.data.SettingsStore
 import dev.beam.android.data.StagedFile
+import dev.beam.android.share.DirectShare
 import dev.beam.core.NearbyDevice
 import dev.beam.core.Visibility
 import kotlinx.coroutines.CoroutineDispatcher
@@ -19,9 +20,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** Screen state on top of [BeamRepository]: the files waiting to be sent, and settings edits. */
 class BeamViewModel(
@@ -29,6 +34,8 @@ class BeamViewModel(
     private val files: FileAccess,
     private val settings: SettingsStore,
     private val io: CoroutineDispatcher = Dispatchers.IO,
+    /** A send to this device id started (ranks its share-sheet target higher). */
+    private val onSend: (String) -> Unit = {},
 ) : ViewModel() {
     val state: StateFlow<BeamState> = repository.state
 
@@ -55,7 +62,29 @@ class BeamViewModel(
         }
     }
 
-    fun unstage(uri: String) =_staged.update { list -> list.filterNot { it.uri == uri } }
+    /**
+     * Shared to a device's Direct Share target: send as soon as that device
+     * is nearby (on the network or over Bluetooth), or leave the files
+     * staged if it doesn't show up.
+     */
+    fun stageAndSendTo(uris: List<String>, deviceId: String) {
+        if (uris.isEmpty()) return
+        viewModelScope.launch {
+            val described = withContext(io) { uris.mapNotNull { runCatching { files.describe(it) }.getOrNull() } }
+            _staged.update { (it + described).distinctBy { file -> file.uri } }
+            val name = state.value.trusted.firstOrNull { it.deviceId == deviceId }?.name ?: "That device"
+            val device = withTimeoutOrNull(DIRECT_SHARE_WAIT_MS) {
+                state.map { s -> s.nearby.firstOrNull { it.deviceId == deviceId } }.filterNotNull().first()
+            }
+            if (device == null) {
+                repository.showMessage("$name isn't nearby. Pick a device below.")
+            } else {
+                sendTo(device)
+            }
+        }
+    }
+
+    fun unstage(uri: String) = _staged.update { list -> list.filterNot { it.uri == uri } }
 
     fun clearStaged() = _staged.update { emptyList() }
 
@@ -67,7 +96,10 @@ class BeamViewModel(
         viewModelScope.launch {
             val opened = withContext(io) { runCatching { files.open(toSend) } }
             opened
-                .onSuccess { repository.send(device, it.files, it.cleanup) }
+                .onSuccess {
+                    repository.send(device, it.files, it.cleanup)
+                    onSend(device.deviceId)
+                }
                 .onFailure {
                     _staged.value = toSend
                     repository.showMessage("Couldn't read the files: ${BeamRepository.describe(it)}")
@@ -104,10 +136,13 @@ class BeamViewModel(
     }
 
     companion object {
+        /** How long a Direct Share waits for its device to be found. */
+        const val DIRECT_SHARE_WAIT_MS = 20_000L
+
         val Factory: ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 val app = this[ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY] as BeamApp
-                BeamViewModel(app.repository, app.files, app.settings)
+                BeamViewModel(app.repository, app.files, app.settings, onSend = { DirectShare.used(app, it) })
             }
         }
     }

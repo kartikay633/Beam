@@ -13,6 +13,7 @@ import dev.beam.android.radio.LocalHotspot
 import dev.beam.android.radio.NetworkMonitor
 import dev.beam.android.radio.RadioPermissions
 import dev.beam.android.service.Notifications
+import dev.beam.android.share.DirectShare
 import dev.beam.core.BeamNode
 import dev.beam.core.BleCapabilities
 import dev.beam.core.DeviceKind
@@ -22,6 +23,9 @@ import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 
 class BeamApp : Application() {
     /** App-wide, so a transfer outlives the activity. */
@@ -74,5 +78,9 @@ class BeamApp : Application() {
         super.onCreate()
         Notifications.createChannels(this)
         network.start()
+        // Trusted devices become Direct Share targets in the share sheet.
+        scope.launch {
+            repository.state.map { it.trusted }.distinctUntilChanged().collect { DirectShare.publish(this@BeamApp, it) }
+        }
     }
 }

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A laptop outline in the 66dp safe zone of a 108dp adaptive layer. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M36,38h36a3,3 0,0 1,3 3v24h-42v-24a3,3 0,0 1,3 -3zM38,42v20h32v-20zM29,67h50v3a2,2 0,0 1,-2 2h-46a2,2 0,0 1,-2 -2z" />
+</vector>
