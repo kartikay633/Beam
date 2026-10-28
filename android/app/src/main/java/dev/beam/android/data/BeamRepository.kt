@@ -6,9 +6,11 @@ import dev.beam.android.model.TransferUi.Phase
 import dev.beam.core.BeamException
 import dev.beam.core.BeamListener
 import dev.beam.core.BeamNodeInterface
+import dev.beam.core.BleAdvertisement
 import dev.beam.core.Direction
 import dev.beam.core.IncomingOffer
 import dev.beam.core.NearbyDevice
+import dev.beam.core.NearbyLink
 import dev.beam.core.OutgoingFile
 import dev.beam.core.ServiceAdvert
 import dev.beam.core.TransferInfo
@@ -16,6 +18,7 @@ import dev.beam.core.TransferResult
 import dev.beam.core.TrustedDevice
 import dev.beam.core.Visibility
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -67,6 +70,29 @@ interface PlatformDiscovery {
 }
 
 /**
+ * Bluetooth LE, for devices that share no network (SPEC.md 4.2): advertising
+ * and scanning feed the node, and [connect] runs the GATT handshake that
+ * sets up a Wi-Fi link to a device heard only over Bluetooth.
+ */
+interface OfflineRadio {
+    /** Permissions granted, Bluetooth on. */
+    val available: Boolean
+
+    fun start(node: BeamNodeInterface)
+    fun stop()
+
+    /** Re-checks permissions and the Bluetooth switch. */
+    fun refresh()
+    fun advertise(advert: BleAdvertisement?)
+
+    /** Sets up a Wi-Fi link to [device]; reports progress through [status]. */
+    suspend fun connect(device: NearbyDevice, status: (String) -> Unit): OfflineLink
+}
+
+/** Where to send after a Bluetooth handshake; [release] once the send is over. */
+class OfflineLink(val address: String, val deviceId: String?, val release: () -> Unit)
+
+/**
  * Owns the Rust node and turns its events into [BeamState]. Listener calls
  * arrive on the node's threads; [MutableStateFlow.update] keeps that safe.
  */
@@ -79,6 +105,8 @@ class BeamRepository(
     private val saveReceived: suspend (List<String>) -> List<String>,
     private val clock: () -> Long = System::currentTimeMillis,
     private val io: CoroutineDispatcher = Dispatchers.IO,
+    /** Set once the app is built; it needs this repository's state. */
+    var radio: OfflineRadio? = null,
 ) {
     private val _state = MutableStateFlow(BeamState(deviceName = settings.deviceName))
     val state: StateFlow<BeamState> = _state.asStateFlow()
@@ -86,6 +114,9 @@ class BeamRepository(
     private val lifecycle = Mutex()
     private var node: BeamNodeInterface? = null
     private var everyoneJob: Job? = null
+    @Volatile private var lanAddresses: List<String> = emptyList()
+    /** Bluetooth sends still setting up their link, so Cancel can stop them. */
+    private val linking = ConcurrentHashMap<String, Job>()
 
     /** Starts receiving and discovery. Does nothing if already running. */
     suspend fun start() = lifecycle.withLock {
@@ -95,9 +126,11 @@ class BeamRepository(
             withContext(io) {
                 val created = createNode(settings, listener)
                 created.setStreams(settings.streams.toUInt())
+                created.setLanAddresses(lanAddresses)
                 created.start()
                 node = created
                 if (settings.discovery == DiscoveryChoice.ANDROID_NSD) platformDiscovery?.start(sink)
+                radio?.start(created)
                 _state.update {
                     it.copy(
                         running = true,
@@ -122,6 +155,7 @@ class BeamRepository(
         val current = node ?: return@withLock
         node = null
         withContext(io) {
+            radio?.stop()
             platformDiscovery?.stop()
             current.stop()
             close(current)
@@ -150,24 +184,68 @@ class BeamRepository(
         node?.setStreams(streams.toUInt())
     }
 
-    /** Sends [files] to a device found nearby (its id) or an `ip:port`. Returns the transfer id. */
-    fun send(target: String, targetName: String, files: List<OutgoingFile>, cleanup: () -> Unit = {}): String {
+    /** This phone's LAN addresses changed (see NetworkMonitor). */
+    fun setLanAddresses(addresses: List<String>) {
+        lanAddresses = addresses
+        node?.setLanAddresses(addresses)
+    }
+
+    /** Bluetooth permissions or the Bluetooth switch changed. */
+    fun refreshRadio() {
+        radio?.refresh()
+    }
+
+    /**
+     * Sends [files] to [device]: straight away when it's on the network, or
+     * through a Bluetooth handshake and a Wi-Fi link when it isn't. Returns
+     * the transfer id.
+     */
+    fun send(device: NearbyDevice, files: List<OutgoingFile>, cleanup: () -> Unit = {}): String {
         val id = UUID.randomUUID().toString()
         val current = node
-        scope.launch(io) {
+        val job = scope.launch(io) {
             try {
-                checkNotNull(current) { "Beam isn't running" }.send(id, target, files)
+                checkNotNull(current) { "Beam isn't running" }
+                if (device.link == NearbyLink.BLUETOOTH) {
+                    sendOffline(current, id, device, files)
+                } else {
+                    current.send(id, device.deviceId, files)
+                }
             } catch (e: Exception) {
-                failSend(id, targetName, files, describe(e))
+                if (e is kotlinx.coroutines.CancellationException) {
+                    _state.update { s -> s.copy(transfers = TransferReducer.finished(s.transfers, id, Phase.CANCELLED, null)) }
+                } else {
+                    failSend(id, device.name, files, describe(e))
+                }
             } finally {
+                linking.remove(id)
                 cleanup()
             }
         }
+        if (device.link == NearbyLink.BLUETOOTH) linking[id] = job
         return id
     }
 
+    private suspend fun sendOffline(node: BeamNodeInterface, id: String, device: NearbyDevice, files: List<OutgoingFile>) {
+        val radio = checkNotNull(radio) { "This phone has no Bluetooth LE" }
+        _state.update { s ->
+            val row = TransferUi(id, true, device.name, files.take(5).map { it.name }, files.size, 0, status = "Connecting over Bluetooth…")
+            s.copy(transfers = TransferReducer.started(s.transfers, row).map { if (it.id == id) it.copy(phase = Phase.WAITING) else it })
+        }
+        val link = radio.connect(device) { status ->
+            _state.update { s -> s.copy(transfers = TransferReducer.status(s.transfers, id, status, null)) }
+        }
+        try {
+            // From here the node reports progress like any other send.
+            linking.remove(id)
+            node.sendTo(id, link.address, link.deviceId, device.name, files)
+        } finally {
+            link.release()
+        }
+    }
+
     fun cancel(transferId: String) {
-        node?.cancel(transferId)
+        linking.remove(transferId)?.cancel() ?: node?.cancel(transferId)
     }
 
     fun respond(offerId: String, accept: Boolean, trust: Boolean) {
@@ -256,7 +334,7 @@ class BeamRepository(
 
     private val listener = object : BeamListener {
         override fun deviceFound(device: NearbyDevice) = _state.update { s ->
-            s.copy(nearby = (s.nearby.filterNot { it.deviceId == device.deviceId } + device).sortedBy { it.name.lowercase() })
+            s.copy(nearby = sortNearby(s.nearby.filterNot { it.deviceId == device.deviceId } + device))
         }
 
         override fun deviceLost(deviceId: String) = _state.update { s ->
@@ -324,6 +402,10 @@ class BeamRepository(
         override fun advertisementChanged(advert: ServiceAdvert?) {
             platformDiscovery?.advertise(advert)
         }
+
+        override fun bleAdvertisementChanged(advert: BleAdvertisement?) {
+            radio?.advertise(advert)
+        }
     }
 
     private fun close(node: BeamNodeInterface) {
@@ -331,6 +413,13 @@ class BeamRepository(
     }
 
     companion object {
+        /** Devices on the network first, then the nearest Bluetooth ones, then by name. */
+        fun sortNearby(devices: List<NearbyDevice>): List<NearbyDevice> = devices.sortedWith(
+            compareBy<NearbyDevice> { it.link != NearbyLink.LAN }
+                .thenByDescending { it.rssi?.toInt() ?: 0 }
+                .thenBy { it.name.lowercase() },
+        )
+
         const val EVERYONE_FOR_MS = 10 * 60 * 1000L
         /** Status of a received transfer until its files are in Downloads. */
         const val SAVING = "Saving to Downloads…"

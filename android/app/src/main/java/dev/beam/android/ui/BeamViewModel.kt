@@ -67,7 +67,7 @@ class BeamViewModel(
         viewModelScope.launch {
             val opened = withContext(io) { runCatching { files.open(toSend) } }
             opened
-                .onSuccess { repository.send(device.deviceId, device.name, it.files, it.cleanup) }
+                .onSuccess { repository.send(device, it.files, it.cleanup) }
                 .onFailure {
                     _staged.value = toSend
                     repository.showMessage("Couldn't read the files: ${BeamRepository.describe(it)}")
@@ -76,6 +76,7 @@ class BeamViewModel(
     }
 
     fun setVisibility(visibility: Visibility) = repository.setVisibility(visibility)
+    fun refreshRadio() = repository.refreshRadio()
     fun cancel(transferId: String) = repository.cancel(transferId)
     fun respond(offerId: String, accept: Boolean, trust: Boolean) = repository.respond(offerId, accept, trust)
     fun clearFinished() = repository.clearFinished()

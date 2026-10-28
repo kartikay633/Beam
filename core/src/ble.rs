@@ -21,6 +21,7 @@
 //! handshake over the link, as on a LAN.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
@@ -470,6 +471,21 @@ impl ResponseOpener {
     }
 }
 
+// ------------------------------------------------------------ link choice
+
+/// Our address on a network the sender is also on, judged by IPv4 /24 (the
+/// usual home and hotspot subnet), so the receiver can answer "use the LAN"
+/// instead of setting up a hotspot. `None` when nothing matches.
+pub fn shared_lan(theirs: &[IpAddr], ours: &[IpAddr]) -> Option<IpAddr> {
+    ours.iter().copied().find(|mine| match mine {
+        IpAddr::V4(m) if !m.is_loopback() && !m.is_link_local() => theirs.iter().any(|t| match t {
+            IpAddr::V4(t) => t.octets()[..3] == m.octets()[..3] && t != m,
+            IpAddr::V6(_) => false,
+        }),
+        _ => false,
+    })
+}
+
 // ------------------------------------------------------------ fragmentation
 
 /// Bytes of ATT overhead in a write or notification.
@@ -718,6 +734,23 @@ mod tests {
         info.v = 2;
         let result = GattClientHandshake::request(&to_cbor(&info), &hotspot_request());
         assert_eq!(result.err(), Some(BleError::Version(2)));
+    }
+
+    #[test]
+    fn a_shared_lan_is_found_by_subnet() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let ours = [ip("127.0.0.1"), ip("10.0.0.5"), ip("192.168.1.20")];
+        assert_eq!(
+            shared_lan(&[ip("192.168.1.31")], &ours),
+            Some(ip("192.168.1.20"))
+        );
+        assert_eq!(shared_lan(&[ip("192.168.2.31")], &ours), None);
+        assert_eq!(
+            shared_lan(&[ip("127.0.0.9")], &ours),
+            None,
+            "loopback never counts"
+        );
+        assert_eq!(shared_lan(&[], &ours), None);
     }
 
     #[test]

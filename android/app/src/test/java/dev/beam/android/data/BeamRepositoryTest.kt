@@ -5,7 +5,10 @@ import dev.beam.core.BeamException
 import dev.beam.core.Direction
 import dev.beam.core.FileSource
 import dev.beam.core.IncomingOffer
+import dev.beam.core.BleAdvertisement
 import dev.beam.core.NearbyDevice
+import dev.beam.core.NearbyLink
+import dev.beam.core.BeamNodeInterface
 import dev.beam.core.DeviceKind
 import dev.beam.core.OfferFile
 import dev.beam.core.OutgoingFile
@@ -13,6 +16,7 @@ import dev.beam.core.ServiceAdvert
 import dev.beam.core.TransferInfo
 import dev.beam.core.TransferResult
 import dev.beam.core.Visibility
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
@@ -161,7 +165,7 @@ class BeamRepositoryTest {
         node.sendResult = { throw BeamException.Failed("\"ThinkPad\" didn't answer") }
         var cleaned = false
         val file = OutgoingFile("a.jpg", 0, FileSource.Path("/cache/a.jpg"))
-        val id = repo.send("aaaa-bbbb-cccc-dddd", "ThinkPad", listOf(file)) { cleaned = true }
+        val id = repo.send(lan("aaaa-bbbb-cccc-dddd", "ThinkPad", trusted = false), listOf(file)) { cleaned = true }
         advanceUntilIdle()
         val t = repo.state.value.transfers.single()
         assertEquals(id, t.id)
@@ -174,8 +178,8 @@ class BeamRepositoryTest {
     fun nearbyDevicesAreSortedAndRemoved() = runTest(dispatcher) {
         val repo = repository()
         repo.start()
-        node.listener.deviceFound(NearbyDevice("2", "zenbook", DeviceKind.LAPTOP, null, false))
-        node.listener.deviceFound(NearbyDevice("1", "ThinkPad", DeviceKind.LAPTOP, null, true))
+        node.listener.deviceFound(lan("2", "zenbook", trusted = false))
+        node.listener.deviceFound(lan("1", "ThinkPad", trusted = true))
         assertEquals(listOf("ThinkPad", "zenbook"), repo.state.value.nearby.map { it.name })
         node.listener.deviceLost("2")
         assertEquals(listOf("ThinkPad"), repo.state.value.nearby.map { it.name })
@@ -196,7 +200,7 @@ class BeamRepositoryTest {
     fun stoppingClearsWhatIsNoLongerTrue() = runTest(dispatcher) {
         val repo = repository()
         repo.start()
-        node.listener.deviceFound(NearbyDevice("1", "ThinkPad", DeviceKind.LAPTOP, null, true))
+        node.listener.deviceFound(lan("1", "ThinkPad", trusted = true))
         repo.stop()
         assertFalse(repo.state.value.running)
         assertTrue(repo.state.value.nearby.isEmpty())
@@ -218,6 +222,99 @@ class BeamRepositoryTest {
         repo.start()
         assertFalse(repo.state.value.running)
         assertEquals("could not start receiving: address in use", repo.state.value.error)
+    }
+
+    @Test
+    fun aBluetoothOnlyDeviceIsReachedThroughTheRadio() = runTest(dispatcher) {
+        val repo = repository()
+        val radio = FakeRadio()
+        repo.radio = radio
+        repo.start()
+        assertTrue(radio.started)
+
+        var cleaned = false
+        val file = OutgoingFile("a.jpg", 0, FileSource.Path("/cache/a.jpg"))
+        val id = repo.send(ble("ble-0a0b0c0d0e0f", "ThinkPad"), listOf(file)) { cleaned = true }
+        advanceUntilIdle()
+        assertEquals("ThinkPad", radio.connected.single().name)
+        // The node sent to the address the handshake produced.
+        assertEquals("192.168.43.20:9000", node.sent.single().first)
+        assertTrue("the hotspot lease is returned", radio.released)
+        assertTrue(cleaned)
+        assertEquals(id, repo.state.value.transfers.single().id)
+    }
+
+    @Test
+    fun aBluetoothSendCanBeCancelledWhileItSetsUp() = runTest(dispatcher) {
+        val repo = repository()
+        val radio = FakeRadio(hang = true)
+        repo.radio = radio
+        repo.start()
+        val id = repo.send(ble("ble-0a0b0c0d0e0f", "ThinkPad"), listOf(OutgoingFile("a.jpg", 0, FileSource.Path("/a")))) {}
+        advanceUntilIdle()
+        assertEquals("Waiting for ThinkPad to join…", repo.state.value.transfers.single().status)
+        repo.cancel(id)
+        advanceUntilIdle()
+        assertEquals(Phase.CANCELLED, repo.state.value.transfers.single().phase)
+        assertTrue(node.sent.isEmpty())
+    }
+
+    @Test
+    fun lanAddressesReachTheNodeAndAdvertsTheRadio() = runTest(dispatcher) {
+        val repo = repository()
+        val radio = FakeRadio()
+        repo.radio = radio
+        repo.setLanAddresses(listOf("192.168.1.5"))
+        repo.start()
+        assertEquals(listOf("192.168.1.5"), node.lan)
+        repo.setLanAddresses(emptyList())
+        assertEquals(emptyList<String>(), node.lan)
+        val advert = BleAdvertisement("uuid", ByteArray(10), "Pixel")
+        node.listener.bleAdvertisementChanged(advert)
+        assertEquals(advert, radio.adverts.last())
+    }
+
+    @Test
+    fun networkDevicesComeBeforeBluetoothOnesByStrength() {
+        val sorted = BeamRepository.sortNearby(
+            listOf(ble("b", "far", -90), lan("l", "zed", false), ble("a", "near", -40)),
+        )
+        assertEquals(listOf("zed", "near", "far"), sorted.map { it.name })
+    }
+
+    private fun lan(id: String, name: String, trusted: Boolean) =
+        NearbyDevice(id, name, DeviceKind.LAPTOP, "192.168.1.20:9000", trusted, NearbyLink.LAN, null, null)
+
+    private fun ble(id: String, name: String, rssi: Short = -50) =
+        NearbyDevice(id, name, DeviceKind.LAPTOP, null, false, NearbyLink.BLUETOOTH, "AA:BB:CC:DD:EE:FF", rssi)
+
+    class FakeRadio(private val hang: Boolean = false) : OfflineRadio {
+        var started = false
+        var released = false
+        val connected = mutableListOf<NearbyDevice>()
+        val adverts = mutableListOf<BleAdvertisement?>()
+        override val available = true
+
+        override fun start(node: BeamNodeInterface) {
+            started = true
+        }
+
+        override fun stop() {
+            started = false
+        }
+
+        override fun refresh() {}
+
+        override fun advertise(advert: BleAdvertisement?) {
+            adverts += advert
+        }
+
+        override suspend fun connect(device: NearbyDevice, status: (String) -> Unit): OfflineLink {
+            connected += device
+            status("Waiting for ${device.name} to join…")
+            if (hang) CompletableDeferred<Unit>().await()
+            return OfflineLink("192.168.43.20:9000", null) { released = true }
+        }
     }
 
     class FakeDiscovery : PlatformDiscovery {

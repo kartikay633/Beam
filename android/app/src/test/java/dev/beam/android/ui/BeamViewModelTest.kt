@@ -9,6 +9,7 @@ import dev.beam.android.data.StagedFile
 import dev.beam.core.DeviceKind
 import dev.beam.core.FileSource
 import dev.beam.core.NearbyDevice
+import dev.beam.core.NearbyLink
 import dev.beam.core.OutgoingFile
 import java.io.IOException
 import kotlinx.coroutines.Dispatchers
@@ -31,7 +32,7 @@ class BeamViewModelTest {
     private val files = FakeFiles()
     private val settings = MemorySettings()
     private lateinit var node: FakeNode
-    private val laptop = NearbyDevice("aaaa-bbbb-cccc-dddd", "ThinkPad", DeviceKind.LAPTOP, "192.168.1.20:40000", true)
+    private val laptop = NearbyDevice("aaaa-bbbb-cccc-dddd", "ThinkPad", DeviceKind.LAPTOP, "192.168.1.20:40000", true, NearbyLink.LAN, null, null)
 
     @Before
     fun setUp() = Dispatchers.setMain(dispatcher)

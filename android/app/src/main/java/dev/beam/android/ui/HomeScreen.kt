@@ -45,6 +45,7 @@ import dev.beam.android.model.Format
 import dev.beam.android.service.Notifications
 import dev.beam.core.DeviceKind
 import dev.beam.core.NearbyDevice
+import dev.beam.core.NearbyLink
 import dev.beam.core.Visibility
 import kotlinx.coroutines.delay
 
@@ -130,11 +131,11 @@ fun HomeScreen(
                 BeamCard(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
-                            if (state.running) "Looking for devices on this Wi-Fi…" else "Beam isn't running.",
+                            if (state.running) "Looking for devices nearby…" else "Beam isn't running.",
                             style = MaterialTheme.typography.bodyLarge,
                         )
                         Text(
-                            "Open Beam on your laptop. If it's set to trusted devices only, pair with it first.",
+                            "Open Beam on your laptop. It shows up here on the same Wi-Fi, or over Bluetooth when there's no shared network.",
                             style = MaterialTheme.typography.bodySmall,
                         )
                         Button(onClick = onPair) {
@@ -149,7 +150,8 @@ fun HomeScreen(
                 ListItem(
                     headlineContent = { Text(device.name) },
                     supportingContent = {
-                        Text(if (staged.isEmpty()) "Tap to choose files to send" else "Tap to send ${Notifications.files(staged.size)}")
+                        val action = if (staged.isEmpty()) "Tap to choose files" else "Tap to send ${Notifications.files(staged.size)}"
+                        Text(if (device.link == NearbyLink.BLUETOOTH) "No Wi-Fi needed · $action" else action)
                     },
                     leadingContent = {
                         Icon(

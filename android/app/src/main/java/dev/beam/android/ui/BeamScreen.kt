@@ -33,6 +33,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.beam.android.radio.RadioPermissions
 
 enum class Tab(val label: String, val icon: ImageVector) {
     HOME("Home", Icons.Filled.Home),
@@ -86,7 +87,10 @@ fun BeamScreen(vm: BeamViewModel, onRetry: () -> Unit) {
                     state = state,
                     staged = staged,
                     vm = vm,
-                    notificationBanner = { NotificationPermissionBanner() },
+                    notificationBanner = {
+                        NotificationPermissionBanner()
+                        RadioBanner(vm::refreshRadio)
+                    },
                     onRetry = onRetry,
                     onPair = { pairing = true },
                     onShowTransfers = { tab = Tab.TRANSFERS },
@@ -100,6 +104,45 @@ fun BeamScreen(vm: BeamViewModel, onRetry: () -> Unit) {
 
     state.offers.firstOrNull()?.let { offer ->
         OfferDialog(offer) { accept, trust -> vm.respond(offer.offerId, accept, trust) }
+    }
+}
+
+/**
+ * Asks for "Nearby devices" (Bluetooth, and the hotspot) so Beam works with
+ * no shared Wi-Fi, and to switch Bluetooth on. Without them Beam still works
+ * on a shared network.
+ */
+@Composable
+private fun RadioBanner(onChanged: () -> Unit) {
+    val context = LocalContext.current
+    if (!RadioPermissions.hasBluetoothLe(context)) return
+    var granted by remember { mutableStateOf(RadioPermissions.granted(context)) }
+    var bluetoothOn by remember { mutableStateOf(RadioPermissions.bluetoothOn(context)) }
+    var denied by rememberSaveable { mutableStateOf(false) }
+    val request = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+        granted = result.values.all { it }
+        denied = !granted
+        onChanged()
+    }
+    val enable = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        bluetoothOn = RadioPermissions.bluetoothOn(context)
+        onChanged()
+    }
+    when {
+        !granted && denied -> Banner(
+            "Without \"Nearby devices\", Beam only finds devices on your Wi-Fi.",
+            action = "Settings",
+        ) {
+            context.startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.fromParts("package", context.packageName, null)),
+            )
+        }
+        !granted -> Banner("Send without Wi-Fi: Beam uses Bluetooth to find your laptop, then a private Wi-Fi link.", action = "Allow") {
+            request.launch(RadioPermissions.required)
+        }
+        !bluetoothOn -> Banner("Turn on Bluetooth to find devices when you're not on the same Wi-Fi.", action = "Turn on") {
+            runCatching { enable.launch(Intent(android.bluetooth.BluetoothAdapter.ACTION_REQUEST_ENABLE)) }
+        }
     }
 }
 

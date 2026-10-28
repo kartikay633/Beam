@@ -8,8 +8,13 @@ import dev.beam.android.data.DownloadsSaver
 import dev.beam.android.data.IdentityStore
 import dev.beam.android.data.NsdDiscovery
 import dev.beam.android.data.PrefsSettings
+import dev.beam.android.radio.BleRadio
+import dev.beam.android.radio.LocalHotspot
+import dev.beam.android.radio.NetworkMonitor
+import dev.beam.android.radio.RadioPermissions
 import dev.beam.android.service.Notifications
 import dev.beam.core.BeamNode
+import dev.beam.core.BleCapabilities
 import dev.beam.core.DeviceKind
 import dev.beam.core.Discovery
 import dev.beam.core.NodeConfig
@@ -46,17 +51,28 @@ class BeamApp : Application() {
                             DiscoveryChoice.ANDROID_NSD -> Discovery.PLATFORM
                             DiscoveryChoice.BUILT_IN -> Discovery.BUILT_IN
                         },
+                        // Phones host the hotspot when there's no shared network.
+                        ble = if (RadioPermissions.hasBluetoothLe(this)) BleCapabilities(hotspot = true, wifiDirect = false) else null,
                     ),
                     listener,
                 )
             },
             platformDiscovery = NsdDiscovery(this),
             saveReceived = { paths -> saver.save(paths) },
-        )
+        ).also { repo ->
+            if (RadioPermissions.hasBluetoothLe(this)) {
+                repo.radio = BleRadio(this, LocalHotspot(this), scope) {
+                    repo.state.value.busy.any { !it.sending }
+                }
+            }
+        }
     }
+
+    private val network by lazy { NetworkMonitor(this) { repository.setLanAddresses(it) } }
 
     override fun onCreate() {
         super.onCreate()
         Notifications.createChannels(this)
+        network.start()
     }
 }

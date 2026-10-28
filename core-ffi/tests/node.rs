@@ -12,6 +12,7 @@ struct Recorder {
     node: OnceLock<Weak<BeamNode>>,
     saved: Mutex<Vec<String>>,
     adverts: Mutex<Vec<Option<ServiceAdvert>>>,
+    ble_adverts: Mutex<Vec<Option<BleAdvertisement>>>,
 }
 
 impl Recorder {
@@ -22,6 +23,7 @@ impl Recorder {
             node: OnceLock::new(),
             saved: Mutex::default(),
             adverts: Mutex::default(),
+            ble_adverts: Mutex::default(),
         })
     }
 
@@ -102,6 +104,9 @@ impl BeamListener for Recorder {
     fn advertisement_changed(&self, advert: Option<ServiceAdvert>) {
         self.adverts.lock().unwrap().push(advert);
     }
+    fn ble_advertisement_changed(&self, advert: Option<BleAdvertisement>) {
+        self.ble_adverts.lock().unwrap().push(advert);
+    }
 }
 
 fn node(
@@ -131,6 +136,10 @@ fn node_with(
             port: 0,
             listen_address: Some("127.0.0.1".into()),
             discovery,
+            ble: Some(BleCapabilities {
+                hotspot: kind == DeviceKind::Phone,
+                wifi_direct: false,
+            }),
         },
         listener.clone(),
     )
@@ -323,4 +332,166 @@ fn platform_discovery_goes_through_the_app() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// A phone hears a laptop over Bluetooth, runs the GATT handshake through
+/// the API (the radio part is just passing bytes), and sends to the address
+/// the laptop answered with.
+#[test]
+fn bluetooth_handshake_through_the_api() {
+    let dir = tempfile::tempdir().unwrap();
+    let laptop_events = Recorder::new(Some((true, false)));
+    let laptop = node(
+        dir.path(),
+        "Laptop",
+        DeviceKind::Laptop,
+        laptop_events.clone(),
+    );
+    let phone_events = Recorder::new(None);
+    let phone = node(dir.path(), "Phone", DeviceKind::Phone, phone_events.clone());
+    laptop.start().unwrap();
+    phone.start().unwrap();
+
+    // The laptop advertises; the phone's scanner hears it.
+    let advert = laptop.ble_advertisement().expect("visible to everyone");
+    assert_eq!(advert.service_uuid, ble_uuids().service);
+    assert_eq!(advert.service_data.len(), 10);
+    phone.ble_seen(
+        "AA:BB:CC:DD:EE:FF".into(),
+        advert.service_data.clone(),
+        advert.local_name.clone(),
+        -50,
+    );
+    assert_eq!(phone_events.wait_for("found"), "found Laptop");
+    // Hearing it again with a similar signal reports nothing new.
+    phone.ble_seen(
+        "AA:BB:CC:DD:EE:FF".into(),
+        advert.service_data,
+        advert.local_name,
+        -52,
+    );
+    assert_eq!(
+        phone_events
+            .events()
+            .iter()
+            .filter(|e| e.starts_with("found"))
+            .count(),
+        1
+    );
+    // Our own advertisement is never shown.
+    let own = phone.ble_advertisement().unwrap();
+    phone.ble_seen(
+        "11:22:33:44:55:66".into(),
+        own.service_data,
+        own.local_name,
+        -40,
+    );
+    assert_eq!(
+        phone_events
+            .events()
+            .iter()
+            .filter(|e| e.starts_with("found"))
+            .count(),
+        1
+    );
+
+    // GATT: the laptop serves INFO, the phone writes its request in
+    // fragments, the laptop answers with a link.
+    let server = laptop.ble_server_session();
+    let request = BleConnectRequest {
+        links: vec![BleLink::Lan, BleLink::Hotspot],
+        lan: vec!["127.0.0.2".into()],
+        hotspot: Some(HotspotCredentials {
+            ssid: "DIRECT-beam".into(),
+            passphrase: "secret phrase".into(),
+        }),
+        capabilities: 0,
+    };
+    let client = phone
+        .ble_client_session(server.info(), request.clone())
+        .unwrap();
+    assert_eq!(client.device().name.as_deref(), Some("Laptop"));
+    assert_eq!(client.device().device_id, Some(laptop.device_id()));
+    let mut received = None;
+    for fragment in client.request_fragments(23).unwrap() {
+        received = server.receive(fragment).unwrap();
+    }
+    let received = received.expect("whole request");
+    assert_eq!(received.hotspot, request.hotspot);
+    assert_eq!(received.links, request.links);
+
+    // On the same /24 as the phone's reported 10.9.8.20, the laptop can
+    // answer "use the LAN" instead of joining a hotspot.
+    laptop.set_lan_addresses(vec!["10.9.8.7".into()]);
+    let mut on_lan = received.clone();
+    on_lan.lan = vec!["10.9.8.20".into()];
+    let port = laptop.port().unwrap();
+    assert_eq!(
+        laptop.shared_lan_address(on_lan),
+        Some(format!("10.9.8.7:{port}"))
+    );
+    assert_eq!(
+        laptop.shared_lan_address(received),
+        None,
+        "127.0.0.2 shares no LAN"
+    );
+    // These test nodes only listen on loopback.
+    let address = format!("127.0.0.1:{port}");
+    let mut response = None;
+    for fragment in server
+        .respond(
+            BleConnectResponse {
+                link: Some(BleLink::Lan),
+                address: Some(address.clone()),
+                hotspot: None,
+                reason: None,
+            },
+            23,
+        )
+        .unwrap()
+    {
+        response = client.receive(fragment).unwrap();
+    }
+    let response = response.expect("whole response");
+    assert_eq!(response.link, Some(BleLink::Lan));
+
+    let file = dir.path().join("over-ble.txt");
+    std::fs::write(&file, b"found over bluetooth").unwrap();
+    let result = block_on(phone.send_to(
+        "22222222-2222-2222-2222-222222222222".into(),
+        response.address.unwrap(),
+        client.device().device_id,
+        "Laptop".into(),
+        vec![path_file(&file, "over-ble.txt")],
+    ))
+    .unwrap();
+    assert_eq!(result, TransferResult::Completed);
+}
+
+/// The wrong device answering at an address is refused.
+#[test]
+fn send_to_checks_who_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let laptop = node(
+        dir.path(),
+        "Laptop",
+        DeviceKind::Laptop,
+        Recorder::new(Some((true, false))),
+    );
+    let other = node(dir.path(), "Other", DeviceKind::Laptop, Recorder::new(None));
+    let phone = node(dir.path(), "Phone", DeviceKind::Phone, Recorder::new(None));
+    let port = laptop.start().unwrap();
+    let file = dir.path().join("x.txt");
+    std::fs::write(&file, b"x").unwrap();
+    let error = block_on(phone.send_to(
+        "33333333-3333-3333-3333-333333333333".into(),
+        format!("127.0.0.1:{port}"),
+        Some(other.device_id()),
+        "Other".into(),
+        vec![path_file(&file, "x.txt")],
+    ));
+    assert!(
+        matches!(error, Ok(TransferResult::Failed) | Err(_)),
+        "{error:?}"
+    );
 }

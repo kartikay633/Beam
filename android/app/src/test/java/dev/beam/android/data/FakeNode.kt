@@ -3,6 +3,10 @@ package dev.beam.android.data
 import dev.beam.core.BeamException
 import dev.beam.core.BeamListener
 import dev.beam.core.BeamNodeInterface
+import dev.beam.core.BleAdvertisement
+import dev.beam.core.BleClientSession
+import dev.beam.core.BleConnectRequest
+import dev.beam.core.BleServerSession
 import dev.beam.core.OutgoingFile
 import dev.beam.core.TransferResult
 import dev.beam.core.TrustedDevice
@@ -15,6 +19,7 @@ class FakeNode(val listener: BeamListener, var mode: Visibility) : BeamNodeInter
     var sendResult: () -> TransferResult = { TransferResult.COMPLETED }
     var pairResult: () -> TrustedDevice = { TrustedDevice("aaaa-bbbb-cccc-dddd", "ThinkPad", true) }
     val sent = mutableListOf<Pair<String, List<OutgoingFile>>>()
+    var lan = emptyList<String>()
 
     override fun cancel(transferId: String) {
         calls += "cancel $transferId"
@@ -76,4 +81,33 @@ class FakeNode(val listener: BeamListener, var mode: Visibility) : BeamNodeInter
     override fun trustedDevices(): List<TrustedDevice> = trusted.toList()
 
     override fun visibility() = mode
+
+    override fun bleAdvertisement(): BleAdvertisement? = null
+
+    override fun bleClientSession(info: ByteArray, request: BleConnectRequest): BleClientSession = error("not used")
+
+    override fun bleSeen(bleAddress: String, serviceData: ByteArray, localName: String?, rssi: Short) {
+        calls += "ble seen $bleAddress"
+    }
+
+    override fun bleServerSession(): BleServerSession = error("not used")
+
+    override fun port(): UShort? = 40000u
+
+    override suspend fun sendTo(
+        transferId: String,
+        address: String,
+        deviceId: String?,
+        peerName: String,
+        files: List<OutgoingFile>,
+    ): TransferResult {
+        sent += address to files
+        return sendResult()
+    }
+
+    override fun setLanAddresses(addresses: List<String>) {
+        lan = addresses
+    }
+
+    override fun sharedLanAddress(request: BleConnectRequest): String? = null
 }

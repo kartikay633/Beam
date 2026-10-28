@@ -17,6 +17,14 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+mod ble;
+
+pub use ble::{
+    ble_shared_lan, ble_uuids, BleAdvertisement, BleCapabilities, BleClientSession,
+    BleConnectRequest, BleConnectResponse, BleDeviceInfo, BleLink, BleServerSession, BleUuids,
+    HotspotCredentials,
+};
+
 use beam_core::discovery::{
     announcement, first_reachable, interpret_service, next_announcement_change,
 };
@@ -109,6 +117,10 @@ pub struct NodeConfig {
     /// Address to listen on; `None` means every interface.
     pub listen_address: Option<String>,
     pub discovery: Discovery,
+    /// Bluetooth LE discovery and handshakes, done by the app's radio code
+    /// (`ble_advertisement_changed`, `ble_seen`, the BLE sessions); `None`
+    /// to leave Bluetooth off.
+    pub ble: Option<BleCapabilities>,
 }
 
 /// Who does mDNS.
@@ -135,11 +147,28 @@ pub struct ServiceAdvert {
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NearbyDevice {
+    /// The device id, or `ble-<12 hex digits>` for a device heard over
+    /// Bluetooth whose full id isn't known yet.
     pub device_id: String,
     pub name: String,
     pub kind: DeviceKind,
+    /// `ip:port`, for devices on the network.
     pub address: Option<String>,
     pub trusted: bool,
+    /// How it was found: on the network, or over Bluetooth only.
+    pub link: NearbyLink,
+    /// The Bluetooth address to connect to, for `NearbyLink::Bluetooth`.
+    pub ble_address: Option<String>,
+    /// Signal strength in dBm, for Bluetooth sightings (nearer is higher).
+    pub rssi: Option<i16>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NearbyLink {
+    /// On the same network: send right away.
+    Lan,
+    /// Bluetooth only: set up a Wi-Fi link through the GATT handshake first.
+    Bluetooth,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -262,6 +291,8 @@ pub trait BeamListener: Send + Sync {
     /// With [`Discovery::Platform`]: what to register now (replacing any
     /// earlier one), or `None` to unregister.
     fn advertisement_changed(&self, advert: Option<ServiceAdvert>);
+    /// With Bluetooth on: what to advertise now, or `None` to stop.
+    fn ble_advertisement_changed(&self, advert: Option<BleAdvertisement>);
 }
 
 /// A new device key, for the app to keep in its keystore.
@@ -304,6 +335,9 @@ struct Inner {
     listen_address: String,
     port: u16,
     discovery: Discovery,
+    ble: Option<BleCapabilities>,
+    /// Our LAN addresses, as the app last reported them.
+    lan_addresses: Mutex<Vec<String>>,
     listener: Arc<dyn BeamListener>,
     streams: Mutex<usize>,
     offers: Mutex<HashMap<String, PendingOffer>>,
@@ -311,6 +345,8 @@ struct Inner {
     nearby: Mutex<HashMap<DeviceId, beam_core::NearbyDevice>>,
     /// Platform service name → the device it announced.
     services: Mutex<HashMap<String, DeviceId>>,
+    /// Devices heard over Bluetooth, by `ble::ble_key`.
+    ble_devices: Mutex<HashMap<String, ble::BleEntry>>,
     running: Mutex<Option<Running>>,
 }
 
@@ -368,12 +404,15 @@ impl BeamNode {
                 listen_address: config.listen_address.unwrap_or_else(|| "0.0.0.0".into()),
                 port: config.port,
                 discovery: config.discovery,
+                ble: config.ble,
+                lan_addresses: Mutex::default(),
                 listener,
                 streams: Mutex::new(4),
                 offers: Mutex::default(),
                 sends: Mutex::default(),
                 nearby: Mutex::default(),
                 services: Mutex::default(),
+                ble_devices: Mutex::default(),
                 running: Mutex::default(),
             }),
         }))
@@ -410,9 +449,68 @@ impl BeamNode {
             if self.inner.discovery == Discovery::Platform {
                 self.inner.listener.advertisement_changed(None);
             }
+            if self.inner.ble.is_some() {
+                self.inner.listener.ble_advertisement_changed(None);
+            }
         }
         lock(&self.inner.nearby).clear();
         lock(&self.inner.services).clear();
+        lock(&self.inner.ble_devices).clear();
+    }
+
+    /// The port this node receives on, while running.
+    pub fn port(&self) -> Option<u16> {
+        lock(&self.inner.running).as_ref().map(|r| r.port)
+    }
+
+    /// Our LAN IP addresses (empty when on no network). They go into
+    /// Bluetooth advertisements (the "on a LAN" flag) and decide whether a
+    /// Bluetooth handshake can use the LAN instead of a hotspot.
+    pub fn set_lan_addresses(&self, addresses: Vec<String>) {
+        *lock(&self.inner.lan_addresses) = addresses;
+    }
+
+    /// What to advertise over Bluetooth right now (also reported through
+    /// `ble_advertisement_changed`).
+    pub fn ble_advertisement(&self) -> Option<BleAdvertisement> {
+        self.inner.ble_advertisement()
+    }
+
+    /// A Bluetooth scan result carrying Beam service data. Reports
+    /// `device_found` for new devices; devices not seen for 12 seconds are
+    /// reported lost.
+    pub fn ble_seen(
+        &self,
+        ble_address: String,
+        service_data: Vec<u8>,
+        local_name: Option<String>,
+        rssi: i16,
+    ) {
+        self.inner
+            .ble_seen(ble_address, &service_data, local_name, rssi);
+    }
+
+    /// A new GATT connection to our Beam service (we are the receiver).
+    pub fn ble_server_session(&self) -> Arc<BleServerSession> {
+        Arc::new(self.inner.ble_server_session())
+    }
+
+    /// Starts a handshake with a receiver whose `INFO` was just read.
+    pub fn ble_client_session(
+        &self,
+        info: Vec<u8>,
+        request: BleConnectRequest,
+    ) -> Result<Arc<BleClientSession>, BeamError> {
+        Ok(Arc::new(self.inner.ble_client_session(&info, request)?))
+    }
+
+    /// The LAN address to answer a Bluetooth `CONNECT_REQUEST` with, when
+    /// the sender is on one of our networks: `ip:port`.
+    pub fn shared_lan_address(&self, request: BleConnectRequest) -> Option<String> {
+        let ours = lock(&self.inner.lan_addresses).clone();
+        let ip = ble_shared_lan(request.lan, ours)?;
+        let port = self.port()?;
+        Some(std::net::SocketAddr::new(ip.parse().ok()?, port).to_string())
     }
 
     /// With [`Discovery::Platform`]: the platform resolved a `_beam._tcp`
@@ -501,7 +599,38 @@ impl BeamNode {
     ) -> Result<TransferResult, BeamError> {
         let inner = self.inner.clone();
         self.runtime
-            .spawn(async move { inner.send(transfer_id, target, files).await })
+            .spawn(async move { inner.send(transfer_id, Target::Find(target), files).await })
+            .await
+            .map_err(failed)?
+    }
+
+    /// Sends to an `ip:port` reached some other way (after a Bluetooth
+    /// handshake). `device_id`, when known, must be who answers there.
+    pub async fn send_to(
+        &self,
+        transfer_id: String,
+        address: String,
+        device_id: Option<String>,
+        peer_name: String,
+        files: Vec<OutgoingFile>,
+    ) -> Result<TransferResult, BeamError> {
+        let addr = address
+            .parse()
+            .map_err(|_| failed(format!("{address:?} is not an address")))?;
+        let expect = match device_id {
+            Some(id) if !id.starts_with("ble-") => Some(id.parse().map_err(failed)?),
+            _ => None,
+        };
+        let inner = self.inner.clone();
+        self.runtime
+            .spawn(async move {
+                let target = Target::At {
+                    addr,
+                    expect,
+                    name: peer_name,
+                };
+                inner.send(transfer_id, target, files).await
+            })
             .await
             .map_err(failed)?
     }
@@ -587,6 +716,10 @@ impl Inner {
         });
 
         let mut tasks = vec![receive_task];
+        if self.ble.is_some() {
+            tasks.push(tokio::spawn(self.clone().advertise_ble()));
+            tasks.push(tokio::spawn(self.clone().expire_ble()));
+        }
         let advertiser = match self.discovery {
             Discovery::Off => None,
             Discovery::Platform => {
@@ -646,24 +779,31 @@ impl Inner {
 
     fn found(&self, device: beam_core::NearbyDevice) {
         lock(&self.nearby).insert(device.device_id, device.clone());
+        let id = device.device_id.to_string();
+        self.lan_changed(&id, true);
         self.listener.device_found(NearbyDevice {
-            device_id: device.device_id.to_string(),
+            device_id: id,
             name: device.name,
             kind: device.device_type.into(),
             address: device.addresses.first().map(|a| a.to_string()),
             trusted: device.trusted.is_some(),
+            link: NearbyLink::Lan,
+            ble_address: None,
+            rssi: None,
         });
     }
 
     fn lost(&self, id: DeviceId) {
         lock(&self.nearby).remove(&id);
         self.listener.device_lost(id.to_string());
+        // Still in Bluetooth range: show that instead.
+        self.lan_changed(&id.to_string(), false);
     }
 
     async fn send(
         self: Arc<Self>,
         transfer_id: String,
-        target: String,
+        target: Target,
         files: Vec<OutgoingFile>,
     ) -> Result<TransferResult, BeamError> {
         let file_names: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
@@ -671,7 +811,10 @@ impl Inner {
         // app handed over is owned (and closed) even when one fails.
         let opened: Vec<_> = files.into_iter().map(open_source).collect();
         let sources = opened.into_iter().collect::<Result<Vec<_>, _>>()?;
-        let (addr, expect_device, peer_name) = self.resolve(&target).await?;
+        let (addr, expect_device, peer_name) = match target {
+            Target::Find(target) => self.resolve(&target).await?,
+            Target::At { addr, expect, name } => (addr, expect, name),
+        };
         let (cancel_tx, cancel_rx) = watch::channel(false);
         lock(&self.sends).insert(transfer_id.clone(), cancel_tx);
 
@@ -755,6 +898,18 @@ impl Inner {
             .ok_or_else(|| failed(format!("\"{}\" didn't answer", device.name)))?;
         Ok((addr, Some(id), device.name))
     }
+}
+
+/// Where a send goes.
+enum Target {
+    /// A device id from discovery, or a literal address.
+    Find(String),
+    /// An address reached some other way, and who should answer there.
+    At {
+        addr: std::net::SocketAddr,
+        expect: Option<DeviceId>,
+        name: String,
+    },
 }
 
 /// Turns an `OutgoingFile` into something the sender can read.
