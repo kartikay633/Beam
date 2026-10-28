@@ -26,6 +26,14 @@ export function Home({ snapshot }: { snapshot: Snapshot }) {
       </header>
       <DropZone snapshot={snapshot} />
       {error && <div className="banner error">{error}</div>}
+      {snapshot.notice && (
+        <div className="banner error with-action">
+          <span>{snapshot.notice}</span>
+          <button className="ghost small" onClick={() => api.dismissNotice()}>
+            Dismiss
+          </button>
+        </div>
+      )}
       <NearbyDevices snapshot={snapshot} onSend={send} />
       <Transfers transfers={snapshot.transfers} />
     </div>
@@ -113,7 +121,11 @@ function NearbyDevices({ snapshot, onSend }: { snapshot: Snapshot; onSend: (targ
     <section>
       <div className="section-header">
         <h2>Nearby</h2>
-        <span className="muted small">Devices on this network running Beam</span>
+        <span className="muted small">
+          {snapshot.bluetoothProblem
+            ? `On this network · Bluetooth unavailable: ${snapshot.bluetoothProblem}`
+            : "On this network, or close by over Bluetooth"}
+        </span>
       </div>
       {snapshot.nearby.length === 0 ? (
         <div className="empty">
@@ -121,8 +133,8 @@ function NearbyDevices({ snapshot, onSend }: { snapshot: Snapshot; onSend: (targ
           <div>
             <strong>Looking for devices…</strong>
             <div className="muted small">
-              Make sure the other device is on the same Wi-Fi and has Beam open. Devices set to "trusted only" appear
-              once you trust each other.
+              Open Beam on your phone. It shows up here on the same Wi-Fi, or over Bluetooth when you share no
+              network. Devices set to "trusted only" appear once you trust each other.
             </div>
           </div>
         </div>
@@ -166,6 +178,7 @@ function DeviceCard({ device, ready, onSend }: { device: Device; ready: boolean;
         <div className="muted small">
           {device.kind === "phone" ? "Phone" : device.kind === "laptop" ? "Computer" : "Device"}
           {device.trusted ? " · Trusted" : ""}
+          {device.link === "bluetooth" ? " · No Wi-Fi needed" : ""}
         </div>
       </div>
       <button

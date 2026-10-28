@@ -5,6 +5,7 @@
 
 mod commands;
 mod keystore;
+mod offline;
 mod pairing;
 mod sendto;
 mod settings;
@@ -76,6 +77,7 @@ fn main() {
             commands::send_staged,
             commands::cancel_transfer,
             commands::clear_finished,
+            commands::dismiss_notice,
             commands::set_visibility,
             commands::set_auto_accept,
             commands::remove_trusted,

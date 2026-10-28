@@ -62,6 +62,11 @@ pub fn clear_finished(state: AppStateRef<'_>) {
 }
 
 #[tauri::command]
+pub fn dismiss_notice(state: AppStateRef<'_>) {
+    state.dismiss_notice();
+}
+
+#[tauri::command]
 pub fn set_visibility(state: AppStateRef<'_>, mode: String) -> Result<(), String> {
     let mode: VisibilityMode = mode.parse()?;
     state.set_visibility(mode);

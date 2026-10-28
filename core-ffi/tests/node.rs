@@ -378,6 +378,25 @@ fn bluetooth_handshake_through_the_api() {
             .count(),
         1
     );
+    // The phone can call the laptop (which can't host a GATT service).
+    // Not trusted, so it's keyed by its advertised id prefix.
+    let key = format!("ble-{}", &laptop.device_id().replace('-', "")[..12]);
+    let call = phone.ble_call_advertisement(key).expect("heard it");
+    assert_eq!(call.service_data.len(), 10);
+    assert_ne!(call.service_data[8] & 0x20, 0, "the call flag");
+    assert!(phone
+        .ble_call_advertisement("ble-000000000000".into())
+        .is_none());
+    let mut hello = b"BEAMHI01".to_vec();
+    hello.extend([1, 2, 3, 4, 5, 6, 7, 8, 0x23, 0x28]);
+    assert_eq!(
+        parse_ble_hello(hello),
+        Some(BleHello {
+            device_id: "0102-0304-0506-0708".into(),
+            port: 9000
+        })
+    );
+
     // Our own advertisement is never shown.
     let own = phone.ble_advertisement().unwrap();
     phone.ble_seen(
@@ -406,6 +425,7 @@ fn bluetooth_handshake_through_the_api() {
             passphrase: "secret phrase".into(),
         }),
         capabilities: 0,
+        port: None,
     };
     let client = phone
         .ble_client_session(server.info(), request.clone())

@@ -23,6 +23,7 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::{oneshot, watch};
 use uuid::Uuid;
 
+use crate::offline::{BleSighting, OfflineLink, Radio, BLE_EXPIRY};
 use crate::settings::Settings;
 
 /// How long the incoming-offer popup waits for an answer.
@@ -46,6 +47,10 @@ pub struct AppState {
     receiver: Mutex<Option<RunningReceiver>>,
     advertiser: Mutex<Option<Advertiser>>,
     last_emit: Mutex<Instant>,
+    /// Bluetooth LE, for phones that share no network with us.
+    radio: Mutex<Option<Arc<Radio>>>,
+    /// Why Bluetooth isn't available, if it isn't.
+    radio_problem: Mutex<Option<String>>,
 }
 
 struct RunningReceiver {
@@ -57,6 +62,10 @@ struct RunningReceiver {
 #[derive(Default)]
 struct UiState {
     nearby: BTreeMap<DeviceId, NearbyDevice>,
+    /// Phones heard over Bluetooth, by key (`DeviceView::device_id`).
+    ble: BTreeMap<String, BleSighting>,
+    /// A problem to show once (e.g. couldn't join a phone's Wi-Fi).
+    notice: Option<String>,
     /// Newest first.
     transfers: Vec<Transfer>,
     offers: HashMap<Uuid, PendingOffer>,
@@ -91,6 +100,9 @@ pub struct Snapshot {
     pub trusted: Vec<TrustedView>,
     pub staged: Vec<StagedFile>,
     pub settings: Settings,
+    /// `None` when Bluetooth works; otherwise why it doesn't.
+    pub bluetooth_problem: Option<String>,
+    pub notice: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -117,6 +129,10 @@ pub struct DeviceView {
     pub kind: &'static str,
     pub address: Option<String>,
     pub trusted: bool,
+    /// "lan", or "bluetooth" for a phone that shares no network with us.
+    pub link: &'static str,
+    /// Bluetooth signal strength in dBm (nearer is higher).
+    pub rssi: Option<i16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -278,6 +294,8 @@ impl AppState {
             receiver: Mutex::default(),
             advertiser: Mutex::default(),
             last_emit: Mutex::new(Instant::now()),
+            radio: Mutex::default(),
+            radio_problem: Mutex::default(),
         }))
     }
 
@@ -289,8 +307,96 @@ impl AppState {
         *lock(&self.advertiser) = Some(advertiser);
         self.start_browser()?;
         self.watch_visibility_expiry();
+        self.start_radio();
         self.emit();
         Ok(())
+    }
+
+    /// Starts Bluetooth in the background; Beam works without it.
+    fn start_radio(self: &Arc<Self>) {
+        let state = self.clone();
+        tauri::async_runtime::spawn(async move {
+            match Radio::start(Arc::downgrade(&state)).await {
+                Ok(radio) => *lock(&state.radio) = Some(radio),
+                Err(problem) => *lock(&state.radio_problem) = Some(problem),
+            }
+            state.emit();
+            // Forget phones that went quiet.
+            loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let removed = {
+                    let mut ui = state.ui();
+                    let before = ui.ble.len();
+                    ui.ble.retain(|_, s| s.seen.elapsed() < BLE_EXPIRY);
+                    before != ui.ble.len()
+                };
+                if removed {
+                    state.emit();
+                }
+            }
+        });
+    }
+
+    /// A Beam advertisement heard over Bluetooth.
+    pub fn ble_seen(
+        &self,
+        advert: beam_core::ble::BleAdvert,
+        name: Option<String>,
+        address: u64,
+        random_address: bool,
+        rssi: i16,
+    ) {
+        let trusted = self.trust.list().unwrap_or_default();
+        let Some(device) =
+            beam_core::ble::interpret_advert(&advert, name.as_deref(), &self.device, &trusted)
+        else {
+            return;
+        };
+        let key = match device.device_id {
+            Some(id) => id.to_string(),
+            None => format!("ble-{}", hex::encode(device.id)),
+        };
+        let is_new = {
+            let mut ui = self.ui();
+            let is_new = !ui.ble.contains_key(&key);
+            ui.ble.insert(
+                key,
+                BleSighting {
+                    device,
+                    address,
+                    random_address,
+                    rssi,
+                    seen: Instant::now(),
+                },
+            );
+            is_new
+        };
+        if is_new {
+            self.emit();
+        }
+    }
+
+    /// Something went wrong that the user should hear about.
+    pub fn show_error(&self, message: String) {
+        self.ui().notice = Some(message);
+        self.emit();
+    }
+
+    pub fn dismiss_notice(&self) {
+        self.ui().notice = None;
+        self.emit();
+    }
+
+    /// Whether a received transfer is under way.
+    pub fn is_receiving(&self) -> bool {
+        self.ui()
+            .transfers
+            .iter()
+            .any(|t| t.view.direction == "receive" && !t.view.state.is_finished())
+    }
+
+    fn radio(&self) -> Option<Arc<Radio>> {
+        lock(&self.radio).clone()
     }
 
     async fn start_receiver(self: &Arc<Self>) -> Result<u16, String> {
@@ -358,7 +464,11 @@ impl AppState {
             loop {
                 let expiry = state.visibility.everyone_until();
                 tokio::select! {
-                    _ = changes.changed() => {}
+                    _ = changes.changed() => {
+                        if let Some(radio) = state.radio() {
+                            radio.update_advertisement();
+                        }
+                    }
                     _ = async {
                         match expiry {
                             Some(until) => tokio::time::sleep_until(until).await,
@@ -366,6 +476,9 @@ impl AppState {
                         }
                     } => {
                         let _ = state.visibility.mode();
+                        if let Some(radio) = state.radio() {
+                            radio.update_advertisement();
+                        }
                         crate::tray::show_visibility(&state.app, state.visibility.mode());
                         state.emit();
                     }
@@ -406,12 +519,31 @@ impl AppState {
                 kind: device_kind(d.device_type),
                 address: d.addresses.first().map(|a| a.to_string()),
                 trusted: d.trusted.is_some(),
+                link: "lan",
+                rssi: None,
             })
             .collect();
-        // Trusted devices first, then by name.
+        // Phones heard over Bluetooth that aren't also on the network.
+        for (key, sighting) in &ui.ble {
+            if nearby.iter().any(|d| d.device_id == *key) {
+                continue;
+            }
+            nearby.push(DeviceView {
+                device_id: key.clone(),
+                name: sighting.device.name.clone(),
+                kind: device_kind(Some(sighting.device.device_type)),
+                address: None,
+                trusted: sighting.device.trusted.is_some(),
+                link: "bluetooth",
+                rssi: Some(sighting.rssi),
+            });
+        }
+        // Trusted devices first, then on the network, then by name.
         nearby.sort_by(|a, b| {
             b.trusted
                 .cmp(&a.trusted)
+                .then_with(|| a.link.cmp(b.link).reverse())
+                .then_with(|| b.rssi.cmp(&a.rssi))
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
         Snapshot {
@@ -447,6 +579,8 @@ impl AppState {
                 })
                 .collect(),
             settings: self.settings(),
+            bluetooth_problem: lock(&self.radio_problem).clone(),
+            notice: ui.notice.clone(),
         }
     }
 
@@ -522,11 +656,15 @@ impl AppState {
         }
         let id = Uuid::new_v4().to_string();
         let (cancel_tx, cancel_rx) = watch::channel(false);
-        let peer_name = target
-            .parse::<DeviceId>()
-            .ok()
-            .and_then(|device_id| self.ui().nearby.get(&device_id).map(|d| d.name.clone()))
-            .unwrap_or_else(|| target.clone());
+        let peer_name = {
+            let ui = self.ui();
+            target
+                .parse::<DeviceId>()
+                .ok()
+                .and_then(|device_id| ui.nearby.get(&device_id).map(|d| d.name.clone()))
+                .or_else(|| ui.ble.get(&target).map(|s| s.device.name.clone()))
+                .unwrap_or_else(|| target.clone())
+        };
         self.add_transfer(Transfer {
             view: TransferView {
                 id: id.clone(),
@@ -566,8 +704,15 @@ impl AppState {
         paths: Vec<PathBuf>,
         cancel: watch::Receiver<bool>,
     ) {
-        let (addr, expect_device) = match self.resolve_target(&target).await {
-            Ok(found) => found,
+        // Kept until the send ends: it holds any hotspot joined for it.
+        let mut _link: Option<OfflineLink> = None;
+        let (addr, expect_device) = match self.resolve_target(&id, &target).await {
+            Ok(Resolved::Address(addr, expect)) => (addr, expect),
+            Ok(Resolved::Offline(link)) => {
+                let found = (link.addr, link.expect);
+                _link = Some(link);
+                found
+            }
             Err(error) => {
                 self.finish_transfer(&id, TransferState::Failed, Some(error), None);
                 return;
@@ -599,9 +744,26 @@ impl AppState {
         }
     }
 
-    async fn resolve_target(&self, target: &str) -> Result<(SocketAddr, Option<DeviceId>), String> {
+    async fn resolve_target(&self, id: &str, target: &str) -> Result<Resolved, String> {
         if let Ok(addr) = target.parse::<SocketAddr>() {
-            return Ok((addr, None));
+            return Ok(Resolved::Address(addr, None));
+        }
+        // On the network first; over Bluetooth only when it isn't.
+        let on_lan = target
+            .parse::<DeviceId>()
+            .ok()
+            .is_some_and(|device_id| self.ui().nearby.contains_key(&device_id));
+        let sighting = self.ui().ble.get(target).cloned();
+        if let (false, Some(sighting)) = (on_lan, sighting) {
+            let radio = self.radio().ok_or("Bluetooth isn't available")?;
+            let status = |text: &str| {
+                self.update_transfer(id, |t| t.view.detail = Some(text.to_string()));
+                self.emit();
+            };
+            return radio
+                .connect(&sighting, &status)
+                .await
+                .map(Resolved::Offline);
         }
         let device_id: DeviceId = target
             .parse()
@@ -617,7 +779,7 @@ impl AppState {
         let addr = first_reachable(&addresses)
             .await
             .ok_or_else(|| format!("\"{name}\" didn't answer on any of its addresses"))?;
-        Ok((addr, Some(device_id)))
+        Ok(Resolved::Address(addr, Some(device_id)))
     }
 
     fn on_send_event(&self, id: &str, event: SendEvent) {
@@ -847,7 +1009,14 @@ fn apply_progress(t: &mut Transfer, progress: Progress) {
     });
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+/// Where a send goes.
+enum Resolved {
+    Address(SocketAddr, Option<DeviceId>),
+    /// Reached through a Bluetooth handshake (and maybe a hotspot).
+    Offline(OfflineLink),
+}
+
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 

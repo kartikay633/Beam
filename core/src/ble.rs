@@ -12,7 +12,13 @@
 //!   receiver's encrypted `CONNECT_RESPONSE` naming the link to use
 //!   ([`GattServerHandshake`], [`GattClientHandshake`]);
 //! - **fragmentation** of payloads larger than one ATT write
-//!   ([`fragment`], [`Reassembler`]).
+//!   ([`fragment`], [`Reassembler`]);
+//! - **calls**: a device that can't host a GATT server (Windows) is asked to
+//!   connect to the sender instead. The sender advertises a call naming it
+//!   ([`call_advert`], [`is_call_for`]); the called device connects to the
+//!   sender's GATT service as the client, and once it has joined the
+//!   sender's hotspot says where it is with a UDP hello ([`hello_packet`],
+//!   [`parse_hello`]).
 //!
 //! The GATT payloads are encrypted because they can carry a Wi-Fi password:
 //! X25519 between the two ephemeral keys → HKDF-SHA256 → ChaCha20-Poly1305,
@@ -69,7 +75,15 @@ pub mod caps {
     /// Advertisement only: the id is the trusted-only rotating id, not a
     /// device id prefix.
     pub const ROTATING_ID: u8 = 1 << 4;
+    /// Advertisement only: a call. The id is the *called* device's
+    /// advertised id: it should connect to this advertiser's GATT service.
+    pub const CALL: u8 = 1 << 5;
 }
+
+/// UDP port a sender listens on, on its hotspot, for the called device's
+/// [`hello_packet`].
+pub const HELLO_PORT: u16 = 47_813;
+const HELLO_MAGIC: &[u8; 8] = b"BEAMHI01";
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum BleError {
@@ -187,6 +201,10 @@ pub fn interpret_advert(
     me: &LocalDevice,
     trusted: &[TrustedDevice],
 ) -> Option<BleDevice> {
+    // A call names someone else; it's handled by `is_call_for`.
+    if advert.flags & caps::CALL != 0 {
+        return None;
+    }
     if advert.flags & caps::ROTATING_ID != 0 {
         let window = current_window();
         let windows = [window.saturating_sub(1), window, window + 1];
@@ -280,6 +298,10 @@ pub struct ConnectRequest {
     /// Set when the sender is hosting a hotspot for this transfer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hotspot: Option<HotspotInfo>,
+    /// Set when the writer of this request is the one *receiving* (it was
+    /// called): the TCP port it receives on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
 }
 
 /// `CONNECT_RESPONSE`, from the receiver: the link it chose.
@@ -471,6 +493,53 @@ impl ResponseOpener {
     }
 }
 
+// ------------------------------------------------------------ calls
+
+/// The advertisement that calls `callee_id` (the 6-byte id the callee
+/// advertises) to connect to us.
+pub fn call_advert(me: &LocalDevice, callee_id: [u8; 6]) -> BleAdvert {
+    BleAdvert {
+        version: BLE_VERSION,
+        device_type: me.device_type,
+        id: callee_id,
+        flags: caps::CALL | caps::ACCEPTING,
+    }
+}
+
+/// Whether `advert` is a call for `me`: its id is one `me` advertises now
+/// (device id prefix, or a rotating id from the windows around now).
+pub fn is_call_for(advert: &BleAdvert, me: &LocalDevice) -> bool {
+    if advert.flags & caps::CALL == 0 {
+        return false;
+    }
+    if prefix(&me.device_id().0) == advert.id {
+        return true;
+    }
+    let window = current_window();
+    [window.saturating_sub(1), window, window + 1]
+        .iter()
+        .any(|&w| prefix(&rotating_id(me.identity.public_key(), w)) == advert.id)
+}
+
+/// What a called device sends to the sender's [`HELLO_PORT`] once it has
+/// joined the sender's hotspot: "I'm here; I receive on `port`".
+pub fn hello_packet(me: &LocalDevice, port: u16) -> Vec<u8> {
+    let mut out = HELLO_MAGIC.to_vec();
+    out.extend_from_slice(&me.device_id().0);
+    out.extend_from_slice(&port.to_be_bytes());
+    out
+}
+
+/// The device id and receiving port in a hello, or `None` for anything else.
+pub fn parse_hello(data: &[u8]) -> Option<(DeviceId, u16)> {
+    let rest = data.strip_prefix(HELLO_MAGIC)?;
+    if rest.len() != 10 {
+        return None;
+    }
+    let id = DeviceId(rest[..8].try_into().ok()?);
+    Some((id, u16::from_be_bytes([rest[8], rest[9]])))
+}
+
 // ------------------------------------------------------------ link choice
 
 /// Our address on a network the sender is also on, judged by IPv4 /24 (the
@@ -653,7 +722,41 @@ mod tests {
                 ssid: "DIRECT-beam-7f3a".into(),
                 passphrase: "correct horse battery".into(),
             }),
+            port: None,
         }
+    }
+
+    #[test]
+    fn a_call_reaches_only_the_device_it_names() {
+        let phone = device("Pixel", DeviceType::Phone);
+        let laptop = device("ThinkPad", DeviceType::Laptop);
+        let other = device("Other", DeviceType::Laptop);
+
+        let (open, _) = advertisement(&laptop, VisibilityMode::Everyone, 0).unwrap();
+        let call = call_advert(&phone, open.id);
+        assert_eq!(BleAdvert::decode(&call.encode()), Some(call));
+        assert!(is_call_for(&call, &laptop));
+        assert!(!is_call_for(&call, &other));
+        // A call is not a device to list.
+        assert!(interpret_advert(&call, None, &other, &[]).is_none());
+        // An ordinary advertisement is not a call.
+        assert!(!is_call_for(&open, &laptop));
+
+        // Trusted-only laptops advertise a rotating id; calls to it work too.
+        let (hidden, _) = advertisement(&laptop, VisibilityMode::TrustedOnly, 0).unwrap();
+        assert!(is_call_for(&call_advert(&phone, hidden.id), &laptop));
+    }
+
+    #[test]
+    fn hellos_round_trip_and_reject_noise() {
+        let laptop = device("ThinkPad", DeviceType::Laptop);
+        let packet = hello_packet(&laptop, 9000);
+        assert_eq!(parse_hello(&packet), Some((laptop.device_id(), 9000)));
+        assert_eq!(parse_hello(b"BEAMHI01"), None);
+        assert_eq!(parse_hello(b"hello"), None);
+        let mut longer = packet.clone();
+        longer.push(0);
+        assert_eq!(parse_hello(&longer), None);
     }
 
     #[test]

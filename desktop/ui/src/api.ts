@@ -22,6 +22,10 @@ export interface Snapshot {
   trusted: TrustedDevice[];
   staged: StagedFile[];
   settings: Settings;
+  /** Why Bluetooth isn't available, or null when it works. */
+  bluetoothProblem: string | null;
+  /** Something to show once, e.g. a failed Wi-Fi join. */
+  notice: string | null;
 }
 
 export interface Device {
@@ -30,6 +34,9 @@ export interface Device {
   kind: "phone" | "laptop" | "device";
   address: string | null;
   trusted: boolean;
+  /** "bluetooth": not on this network; reached through a private Wi-Fi link. */
+  link: "lan" | "bluetooth";
+  rssi: number | null;
 }
 
 export interface Transfer {
@@ -114,6 +121,7 @@ export const api = {
   send: (target: string) => invoke<void>("send_staged", { target }),
   cancel: (id: string) => invoke<void>("cancel_transfer", { id }),
   clearFinished: () => invoke<void>("clear_finished"),
+  dismissNotice: () => invoke<void>("dismiss_notice"),
   setVisibility: (mode: VisibilityMode) => invoke<void>("set_visibility", { mode }),
   setAutoAccept: (deviceId: string, autoAccept: boolean) =>
     invoke<void>("set_auto_accept", { deviceId, autoAccept }),
@@ -131,8 +139,9 @@ const demo: Snapshot = {
   me: { name: "KARTIKAY-PC", deviceId: "80b4-eac6-82ed-d3d3", port: 9000 },
   visibility: { mode: "everyone", everyoneUntilMs: now + 7 * 60_000 },
   nearby: [
-    { deviceId: "346e-029e-3df3-3625", name: "Kartikay's Pixel", kind: "phone", address: "192.168.1.23:9000", trusted: true },
-    { deviceId: "9f12-77ab-0c44-e1d0", name: "Work ThinkPad", kind: "laptop", address: "192.168.1.40:9000", trusted: false },
+    { deviceId: "346e-029e-3df3-3625", name: "Kartikay's Pixel", kind: "phone", address: "192.168.1.23:9000", trusted: true, link: "lan", rssi: null },
+    { deviceId: "9f12-77ab-0c44-e1d0", name: "Work ThinkPad", kind: "laptop", address: "192.168.1.40:9000", trusted: false, link: "lan", rssi: null },
+    { deviceId: "ble-0a1b2c3d4e5f", name: "Galaxy S25", kind: "phone", address: null, trusted: false, link: "bluetooth", rssi: -58 },
   ],
   transfers: [
     {
@@ -157,6 +166,8 @@ const demo: Snapshot = {
     deviceName: "KARTIKAY-PC", downloadDir: "C:\\Users\\you\\Downloads\\Beam", streams: 4,
     visibility: "everyone", sendToShortcut: true, startWithWindows: false,
   },
+  bluetoothProblem: null,
+  notice: null,
 };
 const demoOffer: Offer = {
   id: "demo", fromName: "Kartikay's Pixel", fromId: "346e-029e-3df3-3625", trusted: false,
@@ -198,6 +209,11 @@ async function demoInvoke<T>(command: string, args: Record<string, unknown>): Pr
           mode: args.mode as VisibilityMode,
           everyoneUntilMs: args.mode === "everyone" ? Date.now() + 600_000 : null,
         };
+      });
+      break;
+    case "dismiss_notice":
+      demoUpdate((s) => {
+        s.notice = null;
       });
       break;
     case "clear_finished":

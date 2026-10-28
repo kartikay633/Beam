@@ -20,9 +20,9 @@ use std::time::Duration;
 mod ble;
 
 pub use ble::{
-    ble_shared_lan, ble_uuids, BleAdvertisement, BleCapabilities, BleClientSession,
-    BleConnectRequest, BleConnectResponse, BleDeviceInfo, BleLink, BleServerSession, BleUuids,
-    HotspotCredentials,
+    ble_shared_lan, ble_uuids, parse_ble_hello, BleAdvertisement, BleCapabilities,
+    BleClientSession, BleConnectRequest, BleConnectResponse, BleDeviceInfo, BleHello, BleLink,
+    BleServerSession, BleUuids, HotspotCredentials,
 };
 
 use beam_core::discovery::{
@@ -488,6 +488,14 @@ impl BeamNode {
     ) {
         self.inner
             .ble_seen(ble_address, &service_data, local_name, rssi);
+    }
+
+    /// The advertisement that asks `device_id` (a device heard over
+    /// Bluetooth, which can't host a GATT service, like a Windows laptop) to
+    /// connect to our GATT service. Advertise it alongside the usual one
+    /// while waiting.
+    pub fn ble_call_advertisement(&self, device_id: String) -> Option<BleAdvertisement> {
+        self.inner.ble_call_advertisement(&device_id)
     }
 
     /// A new GATT connection to our Beam service (we are the receiver).

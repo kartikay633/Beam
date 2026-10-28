@@ -60,6 +60,8 @@ pub struct BleUuids {
     pub connect_response: String,
     /// The MTU to request after connecting.
     pub preferred_mtu: u32,
+    /// UDP port for the hello a called device sends once on our hotspot.
+    pub hello_port: u16,
 }
 
 #[uniffi::export]
@@ -70,7 +72,25 @@ pub fn ble_uuids() -> BleUuids {
         connect_request: ble::CONNECT_REQUEST_UUID.into(),
         connect_response: ble::CONNECT_RESPONSE_UUID.into(),
         preferred_mtu: ble::PREFERRED_MTU as u32,
+        hello_port: ble::HELLO_PORT,
     }
+}
+
+/// A called device announcing itself on our hotspot.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BleHello {
+    pub device_id: String,
+    /// The TCP port it receives on.
+    pub port: u16,
+}
+
+/// Reads a UDP hello (see `beam_core::ble::hello_packet`).
+#[uniffi::export]
+pub fn parse_ble_hello(data: Vec<u8>) -> Option<BleHello> {
+    ble::parse_hello(&data).map(|(id, port)| BleHello {
+        device_id: id.to_string(),
+        port,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -135,6 +155,8 @@ pub struct BleConnectRequest {
     pub hotspot: Option<HotspotCredentials>,
     /// The sender's capability bits (`beam_core::ble::caps`).
     pub capabilities: u8,
+    /// Set when the writer was called and will receive: its TCP port.
+    pub port: Option<u16>,
 }
 
 /// The receiver's `CONNECT_RESPONSE`: the link it chose.
@@ -233,6 +255,7 @@ impl BleServerSession {
             lan: request.lan,
             hotspot: request.hotspot.map(Into::into),
             capabilities: request.caps,
+            port: request.port,
         }))
     }
 
@@ -285,6 +308,8 @@ impl BleClientSession {
 /// A device heard over Bluetooth, keyed by [`ble_key`].
 pub(crate) struct BleEntry {
     pub device: NearbyDevice,
+    /// The id it advertises (what a call to it must name).
+    pub advert_id: [u8; 6],
     pub seen: Instant,
     /// Whether the app has been told about it (a LAN sighting of the same
     /// device takes precedence).
@@ -382,6 +407,7 @@ impl Inner {
             key,
             BleEntry {
                 device: device.clone(),
+                advert_id: seen.id,
                 seen: Instant::now(),
                 shown,
             },
@@ -432,6 +458,17 @@ impl Inner {
         }
     }
 
+    /// The advertisement that calls a device heard over Bluetooth to
+    /// connect to us (it can't host a GATT service itself).
+    pub(crate) fn ble_call_advertisement(&self, key: &str) -> Option<BleAdvertisement> {
+        let advert_id = lock(&self.ble_devices).get(key)?.advert_id;
+        Some(BleAdvertisement {
+            service_uuid: ble::SERVICE_UUID.into(),
+            service_data: ble::call_advert(&self.device, advert_id).encode().to_vec(),
+            local_name: None,
+        })
+    }
+
     pub(crate) fn ble_server_session(&self) -> BleServerSession {
         let handshake = GattServerHandshake::new();
         let capabilities = self.ble.unwrap_or(BleCapabilities {
@@ -461,6 +498,7 @@ impl Inner {
             links: request.links.into_iter().map(Into::into).collect(),
             lan: request.lan,
             hotspot: request.hotspot.map(Into::into),
+            port: request.port,
         };
         let (info, data, opener) = GattClientHandshake::request(info, &request).map_err(failed)?;
         Ok(BleClientSession {

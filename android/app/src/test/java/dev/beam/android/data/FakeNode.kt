@@ -92,6 +92,8 @@ class FakeNode(val listener: BeamListener, var mode: Visibility) : BeamNodeInter
 
     override fun bleServerSession(): BleServerSession = error("not used")
 
+    override fun bleCallAdvertisement(deviceId: String): BleAdvertisement? = null
+
     override fun port(): UShort? = 40000u
 
     override suspend fun sendTo(

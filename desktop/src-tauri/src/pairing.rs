@@ -53,7 +53,7 @@ pub fn pairing_info(me: &LocalDevice, port: u16, window: &PairingWindow) -> Pair
 
 /// Non-loopback addresses a phone on the same network could use: IPv4
 /// first, then global IPv6 (link-local IPv6 needs a scope id and is left out).
-fn lan_addresses() -> Vec<IpAddr> {
+pub(crate) fn lan_addresses() -> Vec<IpAddr> {
     let mut ips: Vec<IpAddr> = if_addrs::get_if_addrs()
         .unwrap_or_default()
         .into_iter()

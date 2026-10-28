@@ -348,6 +348,13 @@ nav {
   color: var(--ok);
 }
 
+.banner.with-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .banner.error {
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   color: var(--danger);

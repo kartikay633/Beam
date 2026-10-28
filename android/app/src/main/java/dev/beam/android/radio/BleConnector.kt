@@ -68,6 +68,7 @@ internal class BleConnector(
                         lan = LocalHotspot.ipv4Addresses().map { it.second }.filter { it != spot.address },
                         hotspot = HotspotCredentials(spot.ssid, spot.passphrase),
                         capabilities = 0u,
+                        port = null,
                     ),
                 )
                 for (fragment in session.requestFragments(gatt.mtu.toUInt())) gatt.write(requestUuid, fragment)
