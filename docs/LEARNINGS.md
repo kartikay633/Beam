@@ -232,7 +232,18 @@ Bugs that took more than an hour to fix. For each one: symptom, root cause, fix.
   progress file from the last 2 s checkpoint. A real app killed right
   after a network drop would lose the same.
 - **Fix:** On a retryable error, the session syncs what the writer has
-  and saves progress first, then waits for a possible CANCEL. Lesson: a
-  wait added to an error path delays everything after it, including
-  saving state.
+  and saves progress first, then waits for a possible CANCEL. The first
+  try moved the wait after shutting down the session's tasks. That also
+  stopped the control-connection reader, so the CANCEL could never arrive,
+  and `sender_can_cancel_mid_transfer` hung on both CI runners while
+  passing locally. Now the session checkpoints in place (the same sync
+  then save the 2 s timer does) while the tasks still run.
+  `a_cancel_arriving_after_the_streams_close_still_cancels` makes the race
+  deterministic: the test proxy delays the control connection, so the data
+  connections always close first. It fails on the broken order and passes
+  on the fix.
+- **Lessons:** A wait added to an error path delays everything after it,
+  including saving state. A race that only CI hits needs a test that
+  forces the ordering; running the test more often locally didn't
+  reproduce it.
 - **Phase:** 7

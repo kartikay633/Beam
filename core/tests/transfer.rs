@@ -1030,6 +1030,61 @@ async fn sender_can_cancel_mid_transfer() {
     );
 }
 
+/// The race CI kept finding: the sender's CANCEL reaches the receiver only
+/// after its data connections have closed. The receiver must still treat
+/// it as cancelled, not as a network drop to wait out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancel_arriving_after_the_streams_close_still_cancels() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("big.bin");
+    write_random_file(&file, 300_000_000, 5);
+    let inbox = tmp.path().join("inbox");
+    let mut receiver = TestReceiver::start(
+        device("receiver"),
+        TrustStore::in_memory(),
+        &inbox,
+        accept_all,
+    )
+    .await;
+    let proxy = Proxy::start(receiver.addr, false).await;
+    proxy.delay_control(Duration::from_millis(150));
+
+    let (cancel, cancel_rx) = tokio::sync::watch::channel(false);
+    let progress = receiver.progress.clone();
+    let canceller = tokio::spawn(async move {
+        while progress.load(std::sync::atomic::Ordering::Relaxed) < 20_000_000 {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        cancel.send(true).unwrap();
+    });
+    let err = send_to(
+        proxy.addr,
+        &device("sender"),
+        &TrustStore::in_memory(),
+        &[file],
+        &SendOptions {
+            cancel: Some(cancel_rx),
+            ..SendOptions::default()
+        },
+        |_| {},
+    )
+    .await
+    .unwrap_err();
+    canceller.await.unwrap();
+    assert!(
+        matches!(err, beam_core::TransferError::CancelledByUser),
+        "{err}"
+    );
+    assert!(matches!(
+        receiver.next_outcome().await,
+        Finished::Failed {
+            retryable: false,
+            ..
+        }
+    ));
+    assert!(files_in(&inbox).is_empty(), "{:?}", files_in(&inbox));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn receiver_can_cancel_mid_transfer() {
     let tmp = tempfile::tempdir().unwrap();

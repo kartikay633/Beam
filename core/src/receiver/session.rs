@@ -656,6 +656,31 @@ impl IncomingTransfer {
         }
         .await;
 
+        // The sender cancelling closes its connections right after sending
+        // CANCEL; a stream or write may fail here first. Read the CANCEL
+        // rather than wait for a resume that will never come. Save progress
+        // before waiting: a new receiver (after a crash or restart) may read
+        // it at any moment. Chunks reported so far were all written before
+        // the checkpoint, which syncs them.
+        let result = match result {
+            Err(err) if err.is_retryable() => {
+                while let Ok(WriterEvent::Persisted { file, chunk, .. }) = writer_events.try_recv()
+                {
+                    if self.files[file].done.is_none() {
+                        self.files[file].bitmap.insert(chunk);
+                    }
+                }
+                if checkpoint(&jobs).await.is_ok() {
+                    let _ = self.save_manifest();
+                }
+                match pending_cancel(&mut frames).await {
+                    Some(reason) => Err(TransferError::Cancelled(reason)),
+                    None => Err(err),
+                }
+            }
+            other => other,
+        };
+
         // A transfer ending for good tells the sender *before* the data
         // connections close; otherwise the sender would see them drop first,
         // take it for a network problem, and reconnect.
@@ -684,22 +709,6 @@ impl IncomingTransfer {
                 self.files[file].bitmap.insert(chunk);
             }
         }
-
-        // The sender cancelling closes its connections right after sending
-        // CANCEL; a stream or write may fail here first. Read the CANCEL
-        // rather than wait for a resume that will never come. Save progress
-        // before waiting: a new receiver (after a crash or restart) may read
-        // it at any moment.
-        let result = match result {
-            Err(err) if err.is_retryable() => {
-                let _ = self.save_manifest();
-                match pending_cancel(&mut frames).await {
-                    Some(reason) => Err(TransferError::Cancelled(reason)),
-                    None => Err(err),
-                }
-            }
-            other => other,
-        };
 
         if result.is_ok() {
             control

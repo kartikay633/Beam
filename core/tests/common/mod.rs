@@ -270,6 +270,10 @@ struct ProxyState {
     forwarded: AtomicU64,
     chaos: Mutex<Option<Chaos>>,
     kills: AtomicU64,
+    /// Holds back each read on the first connection (the control
+    /// connection), sender to receiver, by this long.
+    control_delay: Mutex<Option<Duration>>,
+    connections: AtomicU64,
 }
 
 struct Chaos {
@@ -300,6 +304,8 @@ impl Proxy {
             forwarded: AtomicU64::new(0),
             chaos: Mutex::new(None),
             kills: AtomicU64::new(0),
+            control_delay: Mutex::new(None),
+            connections: AtomicU64::new(0),
         });
         let accept_state = state.clone();
         let accept_task = tokio::spawn(async move {
@@ -315,10 +321,14 @@ impl Proxy {
                 let _ = server.set_nodelay(true);
                 let (client_read, client_write) = client.into_split();
                 let (server_read, server_write) = server.into_split();
+                let delay = match accept_state.connections.fetch_add(1, Ordering::Relaxed) {
+                    0 => *accept_state.control_delay.lock().unwrap(),
+                    _ => None,
+                };
                 let mut pipes = accept_state.pipes.lock().unwrap();
                 while pipes.try_join_next().is_some() {}
-                pipes.spawn(pipe(client_read, server_write, accept_state.clone()));
-                pipes.spawn(pipe(server_read, client_write, accept_state.clone()));
+                pipes.spawn(pipe(client_read, server_write, accept_state.clone(), delay));
+                pipes.spawn(pipe(server_read, client_write, accept_state.clone(), None));
             }
         });
         Proxy {
@@ -336,6 +346,12 @@ impl Proxy {
         };
         chaos.schedule(self.state.forwarded.load(Ordering::Relaxed));
         *self.state.chaos.lock().unwrap() = Some(chaos);
+    }
+
+    /// Delays what the sender writes on its control connection, so the
+    /// receiver sees the data connections close before a CANCEL arrives.
+    pub fn delay_control(&self, delay: Duration) {
+        *self.state.control_delay.lock().unwrap() = Some(delay);
     }
 
     pub fn kills_done(&self) -> u64 {
@@ -379,6 +395,7 @@ async fn pipe(
     mut from: tokio::net::tcp::OwnedReadHalf,
     mut to: tokio::net::tcp::OwnedWriteHalf,
     state: Arc<ProxyState>,
+    delay: Option<Duration>,
 ) {
     let mut buf = vec![0u8; 64 * 1024];
     loop {
@@ -386,6 +403,9 @@ async fn pipe(
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         if let Some(recording) = &state.recording {
             recording.lock().unwrap().extend_from_slice(&buf[..n]);
         }
