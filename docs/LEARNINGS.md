@@ -220,3 +220,19 @@ Bugs that took more than an hour to fix. For each one: symptom, root cause, fix.
   a send to a LAN device that doesn't answer now falls back to Bluetooth,
   on Android and Windows, when the device is in range.
 - **Phase:** 7
+
+## Waiting for a CANCEL delayed saving resume progress
+
+- **Symptom:** `resume_after_the_receiver_restarts` failed once on Linux
+  CI: the new receiver resumed with only 4 MB on disk instead of about 100.
+- **Root cause:** The cancel-race fix above made the receiver wait up to
+  500 ms for a CANCEL before returning a retryable error, and only then
+  save its progress file. The test starts a new receiver 500 ms after
+  killing the old one, so on a slow runner the new receiver read a
+  progress file from the last 2 s checkpoint. A real app killed right
+  after a network drop would lose the same.
+- **Fix:** On a retryable error, the session syncs what the writer has
+  and saves progress first, then waits for a possible CANCEL. Lesson: a
+  wait added to an error path delays everything after it, including
+  saving state.
+- **Phase:** 7

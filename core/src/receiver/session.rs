@@ -656,17 +656,6 @@ impl IncomingTransfer {
         }
         .await;
 
-        // The sender cancelling closes its connections right after sending
-        // CANCEL; a stream or write may fail here first. Read the CANCEL
-        // rather than wait for a resume that will never come.
-        let result = match result {
-            Err(err) if err.is_retryable() => match pending_cancel(&mut frames).await {
-                Some(reason) => Err(TransferError::Cancelled(reason)),
-                None => Err(err),
-            },
-            other => other,
-        };
-
         // A transfer ending for good tells the sender *before* the data
         // connections close; otherwise the sender would see them drop first,
         // take it for a network problem, and reconnect.
@@ -695,6 +684,22 @@ impl IncomingTransfer {
                 self.files[file].bitmap.insert(chunk);
             }
         }
+
+        // The sender cancelling closes its connections right after sending
+        // CANCEL; a stream or write may fail here first. Read the CANCEL
+        // rather than wait for a resume that will never come. Save progress
+        // before waiting: a new receiver (after a crash or restart) may read
+        // it at any moment.
+        let result = match result {
+            Err(err) if err.is_retryable() => {
+                let _ = self.save_manifest();
+                match pending_cancel(&mut frames).await {
+                    Some(reason) => Err(TransferError::Cancelled(reason)),
+                    None => Err(err),
+                }
+            }
+            other => other,
+        };
 
         if result.is_ok() {
             control
