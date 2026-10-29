@@ -67,3 +67,6 @@ __pycache__/
 **/fuzz/artifacts/
 **/fuzz/corpus/
 **/fuzz/coverage/
+
+# The shared debug signing key (see android/app/build.gradle.kts).
+!android/app/debug.keystore

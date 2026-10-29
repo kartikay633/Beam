@@ -760,6 +760,154 @@ mod win {
             );
         }
 
+        /// Lists the Beam advertisements in range, for debugging on real
+        /// devices: `cargo test -p beam-desktop beam_adverts_in_range -- --ignored --nocapture`.
+        #[tokio::test]
+        #[ignore = "needs a Bluetooth LE adapter and a Beam device nearby"]
+        async fn beam_adverts_in_range() {
+            let watcher = BluetoothLEAdvertisementWatcher::new().unwrap();
+            watcher
+                .SetScanningMode(BluetoothLEScanningMode::Active)
+                .unwrap();
+            // (address, service data) -> (signal, name)
+            type Heard = HashMap<(u64, Vec<u8>), (i16, String)>;
+            let heard: Arc<Mutex<Heard>> = Arc::default();
+            let total = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let (sink, count) = (heard.clone(), total.clone());
+            watcher
+                .Received(&TypedEventHandler::new(
+                    move |_, args: Ref<BluetoothLEAdvertisementReceivedEventArgs>| {
+                        count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Ok(args) = args.ok() else { return Ok(()) };
+                        let advertisement = args.Advertisement()?;
+                        for section in advertisement.DataSections()? {
+                            if section.DataType()? != 0x21 {
+                                continue;
+                            }
+                            let bytes = from_buffer(&section.Data()?)?;
+                            if bytes.len() >= 16 && bytes[..16] == service_uuid_le() {
+                                sink.lock().unwrap().insert(
+                                    (args.BluetoothAddress()?, bytes[16..].to_vec()),
+                                    (
+                                        args.RawSignalStrengthInDBm()?,
+                                        advertisement.LocalName()?.to_string(),
+                                    ),
+                                );
+                            }
+                        }
+                        Ok(())
+                    },
+                ))
+                .unwrap();
+            watcher.Start().unwrap();
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            watcher.Stop().unwrap();
+            println!(
+                "{} advertisements in 15 s; Beam ones:",
+                total.load(std::sync::atomic::Ordering::Relaxed)
+            );
+            for ((address, data), (rssi, name)) in heard.lock().unwrap().iter() {
+                println!(
+                    "  {address:012x} rssi {rssi} name {name:?} data {} -> {:?}",
+                    hex::encode(data),
+                    BleAdvert::decode(data)
+                );
+            }
+        }
+
+        /// Waits for a phone's call, then does what answering does (connect,
+        /// GATT handshake) and prints each step, without joining its Wi-Fi:
+        /// `cargo test -p beam-desktop answer_a_call_step_by_step -- --ignored --nocapture`.
+        #[tokio::test]
+        #[ignore = "needs a phone calling this laptop"]
+        async fn answer_a_call_step_by_step() {
+            let watcher = BluetoothLEAdvertisementWatcher::new().unwrap();
+            watcher
+                .SetScanningMode(BluetoothLEScanningMode::Active)
+                .unwrap();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            watcher
+                .Received(&TypedEventHandler::new(
+                    move |_, args: Ref<BluetoothLEAdvertisementReceivedEventArgs>| {
+                        let Ok(args) = args.ok() else { return Ok(()) };
+                        for section in args.Advertisement()?.DataSections()? {
+                            let bytes = from_buffer(&section.Data()?)?;
+                            if section.DataType()? == 0x21
+                                && bytes.len() >= 16 + ble::ADVERT_LEN
+                                && bytes[..16] == service_uuid_le()
+                            {
+                                if let Some(advert) = BleAdvert::decode(&bytes[16..]) {
+                                    if advert.flags & ble::caps::CALL != 0 {
+                                        let random = args.BluetoothAddressType()?
+                                            == BluetoothAddressType::Random;
+                                        let _ = tx.send((args.BluetoothAddress()?, random, advert));
+                                    }
+                                }
+                            }
+                        }
+                        Ok(())
+                    },
+                ))
+                .unwrap();
+            watcher.Start().unwrap();
+            println!("waiting up to 5 minutes for a call…");
+            let (address, random, advert) =
+                tokio::time::timeout(Duration::from_secs(300), rx.recv())
+                    .await
+                    .expect("no call heard")
+                    .unwrap();
+            watcher.Stop().unwrap();
+            let started = Instant::now();
+            println!("call from {address:012x} (random {random}): {advert:?}");
+            let device = Radio::device(address, random).await;
+            println!(
+                "{:?} device: {:?}",
+                started.elapsed(),
+                device.as_ref().map(|_| "ok")
+            );
+            let device = device.unwrap();
+            for mode in [BluetoothCacheMode::Uncached, BluetoothCacheMode::Cached] {
+                let services = device
+                    .GetGattServicesWithCacheModeAsync(mode)
+                    .unwrap()
+                    .await
+                    .unwrap();
+                println!(
+                    "{:?} services ({mode:?}): {:?}",
+                    started.elapsed(),
+                    services.Status()
+                );
+                for service in services.Services().into_iter().flatten() {
+                    let uuid = service.Uuid().unwrap();
+                    let chars = service
+                        .GetCharacteristicsWithCacheModeAsync(mode)
+                        .unwrap()
+                        .await
+                        .unwrap();
+                    println!(
+                        "  service {uuid:?}: characteristics {:?} {:?}",
+                        chars.Status(),
+                        chars
+                            .Characteristics()
+                            .into_iter()
+                            .flatten()
+                            .map(|c| c.Uuid().unwrap())
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
+            let request = ConnectRequest {
+                caps: 0,
+                links: vec![LinkKind::Lan, LinkKind::Hotspot],
+                lan: lan_ips().iter().map(ToString::to_string).collect(),
+                hotspot: None,
+                port: Some(9000),
+            };
+            let response = Radio::handshake(&device, &request).await;
+            println!("{:?} handshake: {response:?}", started.elapsed());
+            let _ = device.Close();
+        }
+
         #[tokio::test]
         #[ignore = "needs a Bluetooth LE adapter"]
         async fn the_scanner_hears_advertisements() {

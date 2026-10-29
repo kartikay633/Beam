@@ -30,6 +30,19 @@ android {
         ndk { abiFilters += abis }
     }
 
+    signingConfigs {
+        // One debug key for every machine and CI run, so a new build
+        // installs over the last one. A different key forces an uninstall,
+        // which wipes the device's identity and its trusted devices.
+        // Not secret: it signs debug builds only.
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false

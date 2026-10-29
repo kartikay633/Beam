@@ -832,3 +832,17 @@ networks. Bluetooth gives a second route. The handshake's own LAN check
 then picks the network if it does work in one direction, or the hotspot
 if not. Untrusted devices are keyed by the id prefix they advertise, so
 the lookup tries both keys.
+
+## 2026-10-29 — One shared debug signing key for Android builds
+
+**What:** `android/app/debug.keystore` is committed, and the debug signing
+config uses it on every machine and in CI.
+
+**Why:** Each GitHub runner generates its own random debug key, so every
+CI APK had a different signature. Android refuses to install an update
+signed with another key, so testers had to uninstall first. Uninstalling
+deletes the app's Keystore entry, so the phone got a new identity and
+lost every trusted device. Its laptop then no longer recognised it, and
+in "trusted only" mode couldn't see it at all. A debug key isn't a
+secret. Release builds for the Play Store will need a real upload key,
+kept out of the repo.
