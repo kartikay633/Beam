@@ -227,7 +227,8 @@ It holds the sender's public key, and for each file: the offered fingerprint
 (name, size, modified time), the reserved final name, a bitmap of verified
 chunks, and the whole-file hash once the file is finished.
 
-- The progress file is saved at least **every 2 s**.
+- The progress file is saved at least **every 2 s**, and after every **64 MB**
+  of new chunks, so a crash on a fast link loses little.
 - Before each save, the files with partly written data are synced to disk, so
   the bitmap never claims chunks that aren't stored.
 - It's deleted when the transfer completes.

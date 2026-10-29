@@ -262,3 +262,22 @@ Bugs that took more than an hour to fix. For each one: symptom, root cause, fix.
   channel from the laptop's Wi-Fi connection. A phone has to follow that
   channel, which Wi-Fi Direct clients do.
 - **Phase:** 8
+
+## A crash on a fast link lost up to 2 s of progress
+
+- **Symptom:** `resume_after_the_receiver_restarts` failed again on Linux
+  CI after the cancel fixes: the restarted receiver resumed with 4 MB
+  instead of about 100.
+- **Root cause:** The test drops the receiver like a crash. A crash keeps
+  only the last progress file, which was saved every 2 s. On a fast runner
+  (or a fast link) 100 MB arrive before the second save, so only the first
+  4 MB were recorded. Passing locally depended on the receiver saving on
+  its way out, which a real crash doesn't do.
+- **Fix:** The receiver also saves after every 64 MB of new chunks
+  (`CHECKPOINT_BYTES`), so a crash loses at most 64 MB or 2 s of data,
+  whichever is less. Before simulating the crash, the test now checks that
+  the progress file already records at least 50 MB. That fails without the
+  fix on any machine (4 MB here too), so it no longer depends on speed.
+- **Lesson:** "Every N seconds" is a promise about time, not about data.
+  On fast links, bound by both.
+- **Phase:** 8

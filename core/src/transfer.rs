@@ -21,8 +21,11 @@ pub const PING_INTERVAL: Duration = Duration::from_secs(5);
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 /// Receiver batches CHUNK_ACKs for at most this long.
 pub const ACK_INTERVAL: Duration = Duration::from_millis(250);
-/// Receiver saves its progress file at least this often.
+/// Receiver saves its progress file at least this often...
 pub const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
+/// ...and after this many new bytes, so a crash on a fast link (hundreds
+/// of MB/s) doesn't lose seconds' worth of data.
+pub const CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
 /// Most parallel data connections per transfer.
 pub const MAX_STREAMS: usize = 16;
 /// A chunk that fails its hash this many times ends the transfer.

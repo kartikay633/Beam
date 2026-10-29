@@ -26,8 +26,9 @@ use crate::sanitize::{sanitize_file_name, unique_file_name};
 use crate::secure::HandshakeInfo;
 use crate::transfer::{
     answer_control, chunk_count, chunk_end, hash_file, pending_cancel, spawn_control_reader,
-    PeerInfo, Progress, TransferError, TransferSummary, ACK_INTERVAL, CHECKPOINT_INTERVAL,
-    CHUNK_SIZE, MAX_CHUNK_RETRIES, MAX_FILES_PER_OFFER, MAX_RAW_NAME_BYTES, PING_INTERVAL,
+    PeerInfo, Progress, TransferError, TransferSummary, ACK_INTERVAL, CHECKPOINT_BYTES,
+    CHECKPOINT_INTERVAL, CHUNK_SIZE, MAX_CHUNK_RETRIES, MAX_FILES_PER_OFFER, MAX_RAW_NAME_BYTES,
+    PING_INTERVAL,
 };
 use crate::trust::TrustedDevice;
 use crate::visibility::VisibilityMode;
@@ -533,6 +534,7 @@ impl IncomingTransfer {
         let mut pending_count = 0usize;
         let mut pending_bytes = 0u64;
         let mut checkpoint_due = false;
+        let mut since_checkpoint = 0u64;
         let mut ack_timer = tokio::time::interval(ACK_INTERVAL);
         let mut checkpoint_timer = tokio::time::interval(CHECKPOINT_INTERVAL);
         // The first tick of an interval fires at once; pings start one
@@ -578,12 +580,20 @@ impl IncomingTransfer {
                                 entry.single_chunk_hash = Some(hash);
                             }
                             let len = chunk_end(chunk, entry.size) - chunk * CHUNK_SIZE;
+                            let file_id = entry.file_id;
                             if entry.done.is_none() && entry.bitmap.insert(chunk) {
                                 progress.bytes_done += len;
-                                handler.progress(transfer_id, progress);
                                 checkpoint_due = true;
+                                since_checkpoint += len;
+                                if since_checkpoint >= CHECKPOINT_BYTES {
+                                    checkpoint(&jobs).await?;
+                                    self.save_manifest()?;
+                                    checkpoint_due = false;
+                                    since_checkpoint = 0;
+                                }
+                                handler.progress(transfer_id, progress);
                             }
-                            pending_acks.entry(entry.file_id).or_default().push(chunk);
+                            pending_acks.entry(file_id).or_default().push(chunk);
                             pending_count += 1;
                             pending_bytes += len;
                             if pending_bytes >= ACK_BATCH_BYTES || pending_count >= ACK_BATCH_CHUNKS {
@@ -640,6 +650,7 @@ impl IncomingTransfer {
                         checkpoint(&jobs).await?;
                         self.save_manifest()?;
                         checkpoint_due = false;
+                        since_checkpoint = 0;
                     }
                     _ = ping_timer.tick() => {
                         ping_nonce += 1;

@@ -3,8 +3,8 @@
 //! One JSON manifest per accepted transfer, at
 //! `<download dir>/.beam-partial/<transfer id>.json`. It is written as soon
 //! as the transfer is accepted (so a reconnect never asks the user again),
-//! then at least every 2 seconds, always *after* the written chunks were
-//! synced to disk. For each file it records the offered fingerprint (name,
+//! then at least every 2 seconds and every 64 MB, always *after* the
+//! written chunks were synced to disk. For each file it records the offered fingerprint (name,
 //! size, modified time), the reserved final name, the bitmap of verified
 //! chunks, and the whole-file hash once the file is finished.
 

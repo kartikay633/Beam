@@ -254,6 +254,24 @@ async fn chaos_fifty_disconnects_during_a_1_gb_transfer() {
     assert_eq!(files_in(&inbox), ["one-gigabyte.bin"]);
 }
 
+/// How much the receiver's progress files in `inbox` record as written.
+fn checkpointed_bytes(inbox: &std::path::Path) -> u64 {
+    let Ok(entries) = fs::read_dir(inbox.join(".beam-partial")) else {
+        return 0;
+    };
+    let chunks: u64 = entries
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter_map(|e| fs::read(e.path()).ok())
+        .filter_map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .flat_map(|manifest| manifest["files"].as_array().cloned().unwrap_or_default())
+        .filter_map(|file| hex::decode(file["chunk_bitmap"].as_str()?).ok())
+        .flatten()
+        .map(|byte| u64::from(byte.count_ones()))
+        .sum();
+    chunks * beam_core::CHUNK_SIZE
+}
+
 /// The receiver goes away completely mid-transfer (like a crash or an app
 /// restart). A new receiver with the same identity and download folder picks
 /// up the progress file, and only the missing chunks are sent.
@@ -295,6 +313,14 @@ async fn resume_after_the_receiver_restarts() {
     while progress.load(std::sync::atomic::Ordering::Relaxed) < 100_000_000 {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    // A crash keeps only what the progress file records. It's saved every
+    // 64 MB as well as every 2 s, so however fast the link, most of the
+    // 100 MB is in it already.
+    assert!(
+        checkpointed_bytes(&inbox) >= 50_000_000,
+        "progress saved before the crash: {} bytes",
+        checkpointed_bytes(&inbox)
+    );
     drop(first);
     proxy.kill_all();
     tokio::time::sleep(Duration::from_millis(500)).await;
