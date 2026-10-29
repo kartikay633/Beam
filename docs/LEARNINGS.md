@@ -247,3 +247,18 @@ Bugs that took more than an hour to fix. For each one: symptom, root cause, fix.
   forces the ordering; running the test more often locally didn't
   reproduce it.
 - **Phase:** 7
+
+## Windows hosts a Wi-Fi Direct group beside its Wi-Fi connection
+
+- **Finding:** Phase 8 feasibility check on the Intel AX201
+  (`wifi_direct_group_beside_the_wifi`, an ignored hardware test). A
+  `WiFiDirectAdvertisementPublisher` with autonomous group owner and legacy
+  settings (SSID and passphrase) reached `Started` immediately. Within about
+  a second a new adapter had 192.168.137.1, and the laptop stayed connected
+  to its Wi-Fi network on the same channel. No admin rights or package
+  identity were needed.
+- **Watch for:** `netsh wlan show wirelesscapabilities` reports "Number of
+  Concurrent Channels Supported: 0", so the group can't use a different
+  channel from the laptop's Wi-Fi connection. A phone has to follow that
+  channel, which Wi-Fi Direct clients do.
+- **Phase:** 8

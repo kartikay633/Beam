@@ -735,11 +735,13 @@ MTU of 517, and:
    so connecting to a trusted-only device reveals nothing to a stranger.
 2. Writes `CONNECT_REQUEST`: its own fresh ephemeral X25519 public key
    (32 bytes, in the clear), then the sealed CBOR
-   `{caps, links, lan, hotspot?, port?}`: capability bits, the links it can
-   use, best first (`"lan"`, `"hotspot"`, `"wifi_direct"`), its LAN IP
-   addresses, `{ssid, passphrase}` if it is hosting a hotspot for this
-   transfer, and, when the writer was *called* and will receive, the TCP
-   port it receives on.
+   `{caps, links, lan, hotspot?, port?, direct?}`: capability bits, the
+   links it can use, best first (`"lan"`, `"wifi_direct"`, `"hotspot"`),
+   its LAN IP addresses, `{ssid, passphrase}` if it is hosting a hotspot
+   for this transfer, when the writer was *called* and will receive, the
+   TCP port it receives on, and `{ssid, passphrase, addr}` if it hosts a
+   Wi-Fi Direct group for this transfer (`addr` is its IPv4 address in the
+   group).
 3. Gets `CONNECT_RESPONSE` as a notification: the sealed CBOR
    `{link?, addr?, hotspot?, reason?}`: the chosen link and the `ip:port` to
    connect to, the receiver's hotspot if it hosts one, or no link and a
@@ -777,7 +779,10 @@ that wants to send to a laptop asks the laptop to connect to *it*:
 3. The phone answers:
    - same LAN: `{link: "lan"}`, and sends to the laptop's LAN address and
      `port` once the response is out;
-   - otherwise `{link: "hotspot", hotspot, addr: "<phone ip>:47813"}`
+   - a Wi-Fi Direct group offered (`direct`): the phone joins it, answers
+     `{link: "wifi_direct", addr: "<phone ip in the group>"}`, and sends to
+     `direct.addr` and `port`. If it can't join, it falls back to:
+   - its hotspot: `{link: "hotspot", hotspot, addr: "<phone ip>:47813"}`
      (`0.0.0.0` when the phone can't tell its own address on the hotspot:
      use the hotspot's gateway).
 4. The laptop joins the hotspot and sends **hellos** over UDP to that
@@ -789,6 +794,25 @@ that wants to send to a laptop asks the laptop to connect to *it*:
 The hello is a hint like an mDNS answer: only devices on the phone's
 hotspot (who know its password) can send one, and Noise proves who
 answers.
+
+### Wi-Fi Direct
+
+A laptop that can host a Wi-Fi Direct group starts one before writing its
+`CONNECT_REQUEST`, in either direction, and offers it as `direct`:
+
+- `ssid`: `DIRECT-Bm-` and 4 random hex digits. Android requires the
+  `DIRECT-xy` prefix to join by name.
+- `passphrase`: 20 random characters, fresh for each group.
+- `addr`: the laptop's address in the group (Windows uses 192.168.137.1).
+
+The group is a WPA2 network the laptop hosts beside its own Wi-Fi
+connection, on the same channel, so the laptop stays online. A phone joins
+it as a Wi-Fi Direct client with the name and passphrase (Android 10's
+`WifiP2pConfig.Builder`), which needs no confirmation and keeps the phone's
+own Wi-Fi too. A receiving phone answers `{link: "wifi_direct", addr:
+"<phone ip>:<port>"}` and the laptop connects there. A phone that can't
+join within 15 s answers with its hotspot instead. One group serves
+overlapping transfers; the laptop closes it 30 s after the last one ends.
 
 ### Fragments
 

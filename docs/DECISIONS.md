@@ -846,3 +846,30 @@ lost every trusted device. Its laptop then no longer recognised it, and
 in "trusted only" mode couldn't see it at all. A debug key isn't a
 secret. Release builds for the Play Store will need a real upload key,
 kept out of the repo.
+
+## 2026-10-29 — The laptop hosts Wi-Fi Direct; the phone joins it by name
+
+**What:** With no shared network, the link is now: LAN, then a Wi-Fi Direct
+group the *laptop* hosts, then the phone's hotspot. The laptop offers the
+group in its `CONNECT_REQUEST` in both directions (it is always the GATT
+client). The phone joins as a Wi-Fi Direct client with the group's name and
+passphrase. The hotspot is started only if that fails.
+
+**Why:**
+- **Laptop as host:** Windows can host a legacy-mode group
+  (`WiFiDirectAdvertisementPublisher` with `LegacySettings`) while staying on
+  its Wi-Fi network. On the Intel AX201 the group was up within a second at
+  192.168.137.1, and the laptop stayed on L-VIT (channel 1) throughout. With
+  the hotspot, the laptop has to leave its network and loses internet for
+  the transfer.
+- **Joining by name:** Android 10's `WifiP2pConfig.Builder` with a network
+  name and passphrase joins without the Wi-Fi Direct invitation dialog. Full
+  P2P negotiation (WPS) would ask the user to accept on one side or both.
+- **Hotspot last, and lazily:** starting the local-only hotspot first (as the
+  call flow did) can stop some phones joining a Wi-Fi Direct group at the
+  same time, so the phone starts it only after Wi-Fi Direct fails.
+- **AWDL and Wi-Fi Aware:** AWDL is Apple-only. Wi-Fi Aware (NAN) has no
+  Windows API, so it could only ever serve phone-to-phone.
+
+The adapter reports "0 concurrent channels": the group must share the
+channel of the laptop's Wi-Fi connection, which Windows does by itself.

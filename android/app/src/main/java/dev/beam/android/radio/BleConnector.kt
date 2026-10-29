@@ -69,6 +69,7 @@ internal class BleConnector(
                         hotspot = HotspotCredentials(spot.ssid, spot.passphrase),
                         capabilities = 0u,
                         port = null,
+                        direct = null,
                     ),
                 )
                 for (fragment in session.requestFragments(gatt.mtu.toUInt())) gatt.write(requestUuid, fragment)

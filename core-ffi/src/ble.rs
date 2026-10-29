@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use crate::{failed, lock, BeamError, DeviceKind, Inner, NearbyDevice, NearbyLink};
 use beam_core::ble::{
-    self, caps, ConnectRequest, ConnectResponse, GattClientHandshake, GattServerHandshake,
-    HotspotInfo, LinkKind, Reassembler, ResponseOpener, ResponseSealer,
+    self, caps, ConnectRequest, ConnectResponse, DirectGroup, GattClientHandshake,
+    GattServerHandshake, HotspotInfo, LinkKind, Reassembler, ResponseOpener, ResponseSealer,
 };
 
 /// A device not heard from for this long is gone.
@@ -144,6 +144,36 @@ impl From<HotspotInfo> for HotspotCredentials {
     }
 }
 
+/// A Wi-Fi Direct group hosted for the transfer (by a laptop): join it as a
+/// Wi-Fi Direct client with this name and passphrase.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BleDirectGroup {
+    pub ssid: String,
+    pub passphrase: String,
+    /// The host's IPv4 address in the group.
+    pub address: String,
+}
+
+impl From<BleDirectGroup> for DirectGroup {
+    fn from(g: BleDirectGroup) -> Self {
+        DirectGroup {
+            ssid: g.ssid,
+            passphrase: g.passphrase,
+            addr: g.address,
+        }
+    }
+}
+
+impl From<DirectGroup> for BleDirectGroup {
+    fn from(g: DirectGroup) -> Self {
+        BleDirectGroup {
+            ssid: g.ssid,
+            passphrase: g.passphrase,
+            address: g.addr,
+        }
+    }
+}
+
 /// The sender's `CONNECT_REQUEST`.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct BleConnectRequest {
@@ -157,6 +187,8 @@ pub struct BleConnectRequest {
     pub capabilities: u8,
     /// Set when the writer was called and will receive: its TCP port.
     pub port: Option<u16>,
+    /// Set when the writer hosts a Wi-Fi Direct group for this transfer.
+    pub direct: Option<BleDirectGroup>,
 }
 
 /// The receiver's `CONNECT_RESPONSE`: the link it chose.
@@ -256,6 +288,7 @@ impl BleServerSession {
             hotspot: request.hotspot.map(Into::into),
             capabilities: request.caps,
             port: request.port,
+            direct: request.direct.map(Into::into),
         }))
     }
 
@@ -499,6 +532,7 @@ impl Inner {
             lan: request.lan,
             hotspot: request.hotspot.map(Into::into),
             port: request.port,
+            direct: request.direct.map(Into::into),
         };
         let (info, data, opener) = GattClientHandshake::request(info, &request).map_err(failed)?;
         Ok(BleClientSession {

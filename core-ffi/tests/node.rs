@@ -435,6 +435,11 @@ fn bluetooth_handshake_through_the_api() {
         }),
         capabilities: 0,
         port: None,
+        direct: Some(BleDirectGroup {
+            ssid: "DIRECT-Bm-4f2a".into(),
+            passphrase: "kq7Pz2mWx9LtR3vB".into(),
+            address: "192.168.137.1".into(),
+        }),
     };
     let client = phone
         .ble_client_session(server.info(), request.clone())
@@ -448,6 +453,7 @@ fn bluetooth_handshake_through_the_api() {
     let received = received.expect("whole request");
     assert_eq!(received.hotspot, request.hotspot);
     assert_eq!(received.links, request.links);
+    assert_eq!(received.direct, request.direct);
 
     // On the same /24 as the phone's reported 10.9.8.20, the laptop can
     // answer "use the LAN" instead of joining a hotspot.

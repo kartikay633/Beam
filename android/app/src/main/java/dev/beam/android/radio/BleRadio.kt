@@ -31,6 +31,7 @@ import dev.beam.android.data.OfflineRadio
 import dev.beam.core.BeamNodeInterface
 import dev.beam.core.BleAdvertisement
 import dev.beam.core.BleConnectRequest
+import dev.beam.core.BleDirectGroup
 import dev.beam.core.BleConnectResponse
 import dev.beam.core.BleLink
 import dev.beam.core.BleServerSession
@@ -62,18 +63,22 @@ import kotlinx.coroutines.withTimeoutOrNull
  * radio.
  *
  * As a receiver, it answers a `CONNECT_REQUEST` with the LAN when both are
- * on one network, or else starts the phone's hotspot for the sender to join.
+ * on one network; else joins the Wi-Fi Direct group the laptop offers, so
+ * neither leaves its Wi-Fi network; else starts the phone's hotspot for the
+ * sender to join.
  *
  * Sending to a laptop works the other way round, because Windows can't
  * reliably host a GATT service: the phone *calls* the laptop (a second
- * advertisement naming it), the laptop connects to this phone's GATT
- * service, gets the hotspot, joins it, and says hello over UDP with the
- * port it receives on.
+ * advertisement naming it), and the laptop connects to this phone's GATT
+ * service with the same offer. Over Wi-Fi Direct the phone then sends to
+ * the laptop's address in the group; over the hotspot the laptop joins it
+ * and says hello over UDP with the port it receives on.
  */
 @SuppressLint("MissingPermission") // Every entry point checks RadioPermissions first.
 class BleRadio(
     private val context: Context,
     private val hotspot: LocalHotspot,
+    private val direct: WifiDirectLink,
     private val scope: CoroutineScope,
     /** Whether a received transfer is under way (keeps the hotspot up). */
     private val receiving: () -> Boolean,
@@ -101,9 +106,13 @@ class BleRadio(
     private val peers = ConcurrentHashMap<String, Peer>()
 
     /** An outgoing call: waiting for the called device to connect to us. */
-    private class Call(val hotspot: LocalHotspot.Info) {
-        /** Its LAN `ip:port` when we share a network, or null to wait for its hello. */
+    private class Call {
+        /** Where to send (LAN or Wi-Fi Direct `ip:port`), or null to wait for its hello. */
         val answered = CompletableDeferred<String?>()
+        /** The laptop's Wi-Fi Direct group, once joined. */
+        @Volatile var joined: WifiDirectLink.Joined? = null
+        /** Our hotspot, when that's the link. */
+        @Volatile var spot: LocalHotspot.Info? = null
     }
 
     @Volatile private var call: Call? = null
@@ -167,15 +176,13 @@ class BleRadio(
     private suspend fun callAndWait(node: BeamNodeInterface, device: NearbyDevice, status: (String) -> Unit): OfflineLink {
         val advert = checkNotNull(node.bleCallAdvertisement(device.deviceId)) { "${device.name} is out of Bluetooth range" }
         check(call == null) { "Another transfer is setting up; try again in a moment" }
-        status("Starting a private Wi-Fi link…")
-        val spot = hotspot.acquire()
         var keep = false
         val socket = DatagramSocket(null).apply {
             reuseAddress = true
             soTimeout = 1_000
             bind(InetSocketAddress(uuids.helloPort.toInt()))
         }
-        val pending = Call(spot)
+        val pending = Call()
         call = pending
         startCallAdvertising(advert)
         try {
@@ -183,7 +190,12 @@ class BleRadio(
             val answer = withTimeoutOrNull(CALL_TIMEOUT_MS) { pending.answered.await() }
             if (!pending.answered.isCompleted) error("${device.name} didn't answer. Is Beam open on it, with Bluetooth on?")
             stopCallAdvertising()
-            if (answer != null) return OfflineLink(answer, device.deviceId) {}
+            if (answer != null) {
+                // The LAN, or the laptop's Wi-Fi Direct group (left when done).
+                keep = true
+                val joined = pending.joined
+                return OfflineLink(answer, device.deviceId) { joined?.release() }
+            }
             status("Waiting for ${device.name} to join…")
             val (address, deviceId) = withTimeoutOrNull(JOIN_TIMEOUT_MS) { awaitHello(socket) }
                 ?: error("${device.name} couldn't join this phone's Wi-Fi")
@@ -193,7 +205,10 @@ class BleRadio(
             call = null
             stopCallAdvertising()
             socket.close()
-            if (!keep) hotspot.release()
+            if (!keep) {
+                pending.joined?.release()
+                if (pending.spot != null) hotspot.release()
+            }
         }
     }
 
@@ -457,6 +472,13 @@ class BleRadio(
         val calledPort = request.port
         if (calledPort != null && pending != null) return answerCall(pending, request, calledPort.toInt())
         node.sharedLanAddress(request)?.let { return BleConnectResponse(BleLink.LAN, it, null, null) }
+        offeredGroup(request)?.let { group ->
+            joinGroup(group)?.let { joined ->
+                val port = checkNotNull(node.port()) { "Beam isn't receiving" }
+                holdWhileReceiving { joined.release() }
+                return BleConnectResponse(BleLink.WIFI_DIRECT, "${joined.address}:$port", null, null)
+            }
+        }
         if (BleLink.HOTSPOT !in request.links) {
             return BleConnectResponse(null, null, null, "no common way to connect")
         }
@@ -467,7 +489,7 @@ class BleRadio(
         }
         val port = checkNotNull(node.port()) { "Beam isn't receiving" }
         val info = hotspot.acquire()
-        holdHotspotWhileReceiving()
+        holdWhileReceiving { hotspot.release() }
         // 0.0.0.0 when the hotspot's address couldn't be found: the other
         // device then tries the hotspot's gateway, which is this phone.
         return BleConnectResponse(
@@ -479,28 +501,47 @@ class BleRadio(
     }
 
     /** The device we called connected: tell it how to reach us. */
-    private fun answerCall(pending: Call, request: BleConnectRequest, port: Int): BleConnectResponse {
-        val ours = LocalHotspot.ipv4Addresses().map { it.second }.filter { it != pending.hotspot.address }
+    private suspend fun answerCall(pending: Call, request: BleConnectRequest, port: Int): BleConnectResponse {
+        val ours = LocalHotspot.ipv4Addresses().map { it.second }
         // On one network already: send to its LAN address.
         bleSharedLan(ours, request.lan)?.let { theirs ->
             pending.answered.complete("$theirs:$port")
             return BleConnectResponse(BleLink.LAN, null, null, null)
         }
+        // Its Wi-Fi Direct group: both stay on their own Wi-Fi networks.
+        offeredGroup(request)?.let { group ->
+            joinGroup(group)?.let { joined ->
+                pending.joined = joined
+                pending.answered.complete("${group.address}:$port")
+                return BleConnectResponse(BleLink.WIFI_DIRECT, joined.address, null, null)
+            }
+        }
+        val spot = hotspot.acquire()
+        pending.spot = spot
         pending.answered.complete(null)
         return BleConnectResponse(
             BleLink.HOTSPOT,
-            "${pending.hotspot.address ?: "0.0.0.0"}:${uuids.helloPort}",
-            HotspotCredentials(pending.hotspot.ssid, pending.hotspot.passphrase),
+            "${spot.address ?: "0.0.0.0"}:${uuids.helloPort}",
+            HotspotCredentials(spot.ssid, spot.passphrase),
             null,
         )
     }
 
-    /** Keeps the hotspot for the transfer that should follow, then lets it go. */
-    private fun holdHotspotWhileReceiving() = scope.launch {
-        // Give the sender time to join and start.
+    private fun offeredGroup(request: BleConnectRequest): BleDirectGroup? =
+        request.direct?.takeIf { BleLink.WIFI_DIRECT in request.links && direct.supported }
+
+    /** Joins the group, or null (and the hotspot is used instead). */
+    private suspend fun joinGroup(group: BleDirectGroup): WifiDirectLink.Joined? =
+        runCatching { direct.join(group.ssid, group.passphrase, group.address) }
+            .onFailure { Log.w(TAG, "Wi-Fi Direct failed; using the hotspot", it) }
+            .getOrNull()
+
+    /** Keeps a link up for the transfer that should follow, then lets it go. */
+    private fun holdWhileReceiving(release: () -> Unit) = scope.launch {
+        // Give the sender time to connect and start.
         delay(90_000)
         while (receiving()) delay(5_000)
-        hotspot.release()
+        release()
     }
 
     @Suppress("DEPRECATION") // The value-taking overload only exists from Android 13.

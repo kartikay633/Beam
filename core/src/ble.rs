@@ -274,6 +274,19 @@ pub struct HotspotInfo {
     pub passphrase: String,
 }
 
+/// A Wi-Fi Direct group the writer of a `CONNECT_REQUEST` hosts for this
+/// transfer (a laptop: Windows can keep its Wi-Fi network while hosting
+/// one). A phone joins it as a Wi-Fi Direct client with the name and
+/// passphrase, which Android allows without asking the user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectGroup {
+    /// Starts with `DIRECT-` and two characters, as Android requires.
+    pub ssid: String,
+    pub passphrase: String,
+    /// The host's IPv4 address in the group.
+    pub addr: String,
+}
+
 /// How the two devices will connect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -302,6 +315,9 @@ pub struct ConnectRequest {
     /// called): the TCP port it receives on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// Set when the writer hosts a Wi-Fi Direct group for this transfer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct: Option<DirectGroup>,
 }
 
 /// `CONNECT_RESPONSE`, from the receiver: the link it chose.
@@ -723,7 +739,40 @@ mod tests {
                 passphrase: "correct horse battery".into(),
             }),
             port: None,
+            direct: None,
         }
+    }
+
+    #[test]
+    fn a_wifi_direct_group_travels_in_the_request() {
+        let laptop = device("ThinkPad", DeviceType::Laptop);
+        let server = GattServerHandshake::new();
+        let info = server.info(&laptop, VisibilityMode::Everyone, 0);
+        let request = ConnectRequest {
+            caps: 0,
+            links: vec![LinkKind::Lan, LinkKind::WifiDirect, LinkKind::Hotspot],
+            lan: vec!["172.16.144.19".into(), "192.168.137.1".into()],
+            hotspot: None,
+            port: Some(9000),
+            direct: Some(DirectGroup {
+                ssid: "DIRECT-Bm-4f2a".into(),
+                passphrase: "kq7Pz2mWx9LtR3vB".into(),
+                addr: "192.168.137.1".into(),
+            }),
+        };
+        let (_, sealed, _) = GattClientHandshake::request(&info, &request).unwrap();
+        let (received, _) = server.accept_request(&sealed).unwrap();
+        assert_eq!(received, request);
+        // Older senders leave the field out.
+        let older: ConnectRequest = from_cbor(
+            &to_cbor(&ConnectRequest {
+                direct: None,
+                ..request
+            }),
+            "request",
+        )
+        .unwrap();
+        assert_eq!(older.direct, None);
     }
 
     #[test]

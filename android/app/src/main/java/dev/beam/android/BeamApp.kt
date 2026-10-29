@@ -12,6 +12,7 @@ import dev.beam.android.radio.BleRadio
 import dev.beam.android.radio.LocalHotspot
 import dev.beam.android.radio.NetworkMonitor
 import dev.beam.android.radio.RadioPermissions
+import dev.beam.android.radio.WifiDirectLink
 import dev.beam.android.service.Notifications
 import dev.beam.android.share.DirectShare
 import dev.beam.core.BeamNode
@@ -65,7 +66,7 @@ class BeamApp : Application() {
             saveReceived = { paths -> saver.save(paths) },
         ).also { repo ->
             if (RadioPermissions.hasBluetoothLe(this)) {
-                repo.radio = BleRadio(this, LocalHotspot(this), scope) {
+                repo.radio = BleRadio(this, LocalHotspot(this), WifiDirectLink(this), scope) {
                     repo.state.value.busy.any { !it.sending }
                 }
             }

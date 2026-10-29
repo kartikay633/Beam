@@ -21,8 +21,8 @@ mod ble;
 
 pub use ble::{
     ble_shared_lan, ble_uuids, parse_ble_hello, BleAdvertisement, BleCapabilities,
-    BleClientSession, BleConnectRequest, BleConnectResponse, BleDeviceInfo, BleHello, BleLink,
-    BleServerSession, BleUuids, HotspotCredentials,
+    BleClientSession, BleConnectRequest, BleConnectResponse, BleDeviceInfo, BleDirectGroup,
+    BleHello, BleLink, BleServerSession, BleUuids, HotspotCredentials,
 };
 
 use beam_core::discovery::{

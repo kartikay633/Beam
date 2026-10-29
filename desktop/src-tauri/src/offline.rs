@@ -50,24 +50,28 @@ pub fn lan_ips() -> Vec<IpAddr> {
 }
 
 /// Where to send after a Bluetooth handshake. Dropping it gives back any
-/// hotspot this laptop joined for the transfer.
+/// hotspot this laptop joined, or the Wi-Fi Direct group it hosted, for
+/// the transfer.
 pub struct OfflineLink {
     pub addr: SocketAddr,
     pub expect: Option<DeviceId>,
     _wifi: Option<WifiLease>,
+    _group: Option<GroupLease>,
 }
 
 #[cfg(windows)]
-pub use win::{Radio, WifiLease};
+pub use win::{GroupLease, Radio, WifiLease};
 
 #[cfg(not(windows))]
-pub use stub::{Radio, WifiLease};
+pub use stub::{GroupLease, Radio, WifiLease};
 
 #[cfg(not(windows))]
 mod stub {
     use super::*;
 
     pub struct WifiLease;
+
+    pub struct GroupLease;
 
     pub struct Radio;
 
@@ -141,6 +145,9 @@ mod win {
         WiFiAccessStatus, WiFiAdapter, WiFiAvailableNetwork, WiFiConnectionStatus,
         WiFiReconnectionKind,
     };
+    use windows::Devices::WiFiDirect::{
+        WiFiDirectAdvertisementPublisher, WiFiDirectAdvertisementPublisherStatus,
+    };
     use windows::Foundation::TypedEventHandler;
     use windows::Networking::Connectivity::NetworkInformation;
     use windows::Networking::HostNameType;
@@ -194,6 +201,51 @@ mod win {
         calls: Mutex<HashMap<u64, Instant>>,
         /// Hotspots joined to receive from a phone, released when done.
         receiving_wifi: Mutex<Vec<WifiLease>>,
+        /// The Wi-Fi Direct group we host for phones to join, if up.
+        group: Mutex<Option<HostedGroup>>,
+        /// Our group, held for phones sending to us over it, and since when.
+        receiving_groups: Mutex<Vec<(Instant, GroupLease)>>,
+    }
+
+    /// A Wi-Fi Direct group this laptop hosts. Windows keeps its Wi-Fi
+    /// network meanwhile (on the same channel), so the laptop stays online.
+    struct HostedGroup {
+        publisher: WiFiDirectAdvertisementPublisher,
+        group: ble::DirectGroup,
+        users: usize,
+        /// When the last user let go.
+        idle_since: Option<Instant>,
+    }
+
+    /// Keeps the hosted group up while held.
+    pub struct GroupLease(Weak<Radio>);
+
+    impl Drop for GroupLease {
+        fn drop(&mut self) {
+            let Some(radio) = self.0.upgrade() else {
+                return;
+            };
+            let mut group = lock(&radio.group);
+            if let Some(hosted) = group.as_mut() {
+                hosted.users = hosted.users.saturating_sub(1);
+                if hosted.users == 0 {
+                    hosted.idle_since = Some(Instant::now());
+                }
+            }
+        }
+    }
+
+    /// An unused group is closed after this long (a next transfer reuses it).
+    const GROUP_IDLE: Duration = Duration::from_secs(30);
+
+    /// Links to offer in a `CONNECT_REQUEST`, best first.
+    fn links(direct: bool) -> Vec<LinkKind> {
+        let mut links = vec![LinkKind::Lan];
+        if direct {
+            links.push(LinkKind::WifiDirect);
+        }
+        links.push(LinkKind::Hotspot);
+        links
     }
 
     impl Radio {
@@ -217,6 +269,8 @@ mod win {
                 names: Mutex::default(),
                 calls: Mutex::default(),
                 receiving_wifi: Mutex::default(),
+                group: Mutex::default(),
+                receiving_groups: Mutex::default(),
             });
             let me = Arc::downgrade(&radio);
             radio
@@ -342,15 +396,17 @@ mod win {
             });
         }
 
-        async fn take_call(&self, address: u64, random: bool) -> Result<(), String> {
+        async fn take_call(self: &Arc<Self>, address: u64, random: bool) -> Result<(), String> {
             let state = self.state.upgrade().ok_or("Beam is closing")?;
             let device = Self::device(address, random).await?;
+            let group = self.host_group().await;
             let request = ConnectRequest {
                 caps: 0,
-                links: vec![LinkKind::Lan, LinkKind::Hotspot],
+                links: links(group.is_some()),
                 lan: lan_ips().iter().map(ToString::to_string).collect(),
                 hotspot: None,
                 port: Some(state.port()),
+                direct: group.as_ref().map(|(g, _)| g.clone()),
             };
             let response = Self::handshake(&device, &request).await.map_err(text);
             let _ = device.Close();
@@ -358,6 +414,12 @@ mod win {
             match response.link {
                 // On one network: the phone sends to our LAN address.
                 Some(LinkKind::Lan) => Ok(()),
+                // The phone joined our group and sends to our address there.
+                Some(LinkKind::WifiDirect) => {
+                    let (_, lease) = group.ok_or("the phone chose a group we don't host")?;
+                    lock(&self.receiving_groups).push((Instant::now(), lease));
+                    Ok(())
+                }
                 Some(LinkKind::Hotspot) => {
                     let hotspot = response
                         .hotspot
@@ -401,6 +463,17 @@ mod win {
                         // Leave time for the transfer to start before letting go.
                         lock(&self.receiving_wifi)
                             .retain(|lease| lease.joined.elapsed() < Duration::from_secs(90));
+                        lock(&self.receiving_groups)
+                            .retain(|(since, _)| since.elapsed() < Duration::from_secs(90));
+                    }
+                    let mut group = lock(&self.group);
+                    let unused = group.as_ref().is_some_and(|hosted| {
+                        hosted.idle_since.is_some_and(|t| t.elapsed() >= GROUP_IDLE)
+                    });
+                    if unused {
+                        if let Some(hosted) = group.take() {
+                            let _ = hosted.publisher.Stop();
+                        }
                     }
                 }
             });
@@ -411,21 +484,23 @@ mod win {
         /// Asks a phone heard over Bluetooth for a link, joining its hotspot
         /// when it offers one.
         pub async fn connect(
-            &self,
+            self: &Arc<Self>,
             sighting: &BleSighting,
             status: &(dyn Fn(&str) + Sync),
         ) -> Result<OfflineLink, String> {
             let name = &sighting.device.name;
             status("Connecting over Bluetooth…");
             let device = Self::device(sighting.address, sighting.random_address).await?;
+            let group = self.host_group().await;
             let request = ConnectRequest {
                 caps: 0,
-                links: vec![LinkKind::Lan, LinkKind::Hotspot],
+                links: links(group.is_some()),
                 lan: lan_ips().iter().map(ToString::to_string).collect(),
                 hotspot: None,
                 port: None,
+                direct: group.as_ref().map(|(g, _)| g.clone()),
             };
-            status(&format!("Waiting for {name} to start its Wi-Fi…"));
+            status(&format!("Waiting for {name} to connect…"));
             let response = Self::handshake(&device, &request).await.map_err(text);
             let _ = device.Close();
             let response = response??;
@@ -440,6 +515,7 @@ mod win {
                         .map_err(|_| "the phone sent an unreadable address".to_string())?,
                     expect,
                     _wifi: None,
+                    _group: None,
                 }),
                 Some(LinkKind::Hotspot) => {
                     let hotspot = response
@@ -452,11 +528,109 @@ mod win {
                         addr: hotspot_target(response.addr.as_deref(), lease.ip)?,
                         expect,
                         _wifi: Some(lease),
+                        _group: None,
                     })
                 }
-                Some(LinkKind::WifiDirect) => Err("Wi-Fi Direct isn't supported yet".into()),
+                // The phone joined our group: it receives at its address there.
+                Some(LinkKind::WifiDirect) => {
+                    let (_, lease) = group.ok_or("the phone chose a group we don't host")?;
+                    Ok(OfflineLink {
+                        addr: response
+                            .addr
+                            .as_deref()
+                            .ok_or("the phone didn't say where to connect")?
+                            .parse()
+                            .map_err(|_| "the phone sent an unreadable address".to_string())?,
+                        expect,
+                        _wifi: None,
+                        _group: Some(lease),
+                    })
+                }
                 None => Err(declined(&response, name)),
             }
+        }
+
+        // ---------------------------------------------------- Wi-Fi Direct
+
+        /// Hosts a Wi-Fi Direct group for a phone to join (or shares the one
+        /// already up). `None` when this adapter can't; the phone then falls
+        /// back to its hotspot.
+        async fn host_group(self: &Arc<Self>) -> Option<(ble::DirectGroup, GroupLease)> {
+            if let Some(shared) = self.share_group() {
+                return Some(shared);
+            }
+            let before = lan_ips();
+            let random = uuid::Uuid::new_v4().simple().to_string();
+            // Android requires "DIRECT-" and two characters.
+            let ssid = format!("DIRECT-Bm-{}", &random[..4]);
+            let passphrase = random[4..24].to_string();
+            let publisher = (|| -> WinResult<WiFiDirectAdvertisementPublisher> {
+                let publisher = WiFiDirectAdvertisementPublisher::new()?;
+                let advertisement = publisher.Advertisement()?;
+                advertisement.SetIsAutonomousGroupOwnerEnabled(true)?;
+                let legacy = advertisement.LegacySettings()?;
+                legacy.SetIsEnabled(true)?;
+                legacy.SetSsid(&HSTRING::from(&ssid))?;
+                let credential = PasswordCredential::new()?;
+                credential.SetPassword(&HSTRING::from(&passphrase))?;
+                legacy.SetPassphrase(&credential)?;
+                publisher.Start()?;
+                Ok(publisher)
+            })()
+            .ok()?;
+            // The group's address appears on a new virtual adapter, usually
+            // within a second.
+            let mut addr = None;
+            for _ in 0..25 {
+                if publisher.Status().ok() == Some(WiFiDirectAdvertisementPublisherStatus::Aborted)
+                {
+                    break;
+                }
+                if let Some(ip) = lan_ips().into_iter().find(|ip| !before.contains(ip)) {
+                    addr = Some(ip);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            let Some(addr) = addr else {
+                let _ = publisher.Stop();
+                return None;
+            };
+            let group = ble::DirectGroup {
+                ssid,
+                passphrase,
+                addr: addr.to_string(),
+            };
+            let mut current = lock(&self.group);
+            if current.is_some() {
+                // Another transfer started one meanwhile: use that.
+                drop(current);
+                let _ = publisher.Stop();
+                return self.share_group();
+            }
+            *current = Some(HostedGroup {
+                publisher,
+                group: group.clone(),
+                users: 1,
+                idle_since: None,
+            });
+            Some((group, GroupLease(Arc::downgrade(self))))
+        }
+
+        /// The group already up, if it still is.
+        fn share_group(self: &Arc<Self>) -> Option<(ble::DirectGroup, GroupLease)> {
+            let mut current = lock(&self.group);
+            let hosted = current.as_mut()?;
+            if hosted.publisher.Status().ok()
+                != Some(WiFiDirectAdvertisementPublisherStatus::Started)
+            {
+                let _ = hosted.publisher.Stop();
+                *current = None;
+                return None;
+            }
+            hosted.users += 1;
+            hosted.idle_since = None;
+            Some((hosted.group.clone(), GroupLease(Arc::downgrade(self))))
         }
 
         async fn device(address: u64, random: bool) -> Result<BluetoothLEDevice, String> {
@@ -902,10 +1076,79 @@ mod win {
                 lan: lan_ips().iter().map(ToString::to_string).collect(),
                 hotspot: None,
                 port: Some(9000),
+                direct: None,
             };
             let response = Radio::handshake(&device, &request).await;
             println!("{:?} handshake: {response:?}", started.elapsed());
             let _ = device.Close();
+        }
+
+        /// Phase 8 feasibility: host a Wi-Fi Direct group with a name and
+        /// passphrase (what an Android phone can join without a prompt) and
+        /// check this laptop stays on its Wi-Fi network meanwhile:
+        /// `cargo test -p beam-desktop wifi_direct_group_beside_the_wifi -- --ignored --nocapture`.
+        #[tokio::test]
+        #[ignore = "needs a Wi-Fi Direct capable adapter"]
+        async fn wifi_direct_group_beside_the_wifi() {
+            use windows::Devices::WiFiDirect::{
+                WiFiDirectAdvertisementPublisher,
+                WiFiDirectAdvertisementPublisherStatusChangedEventArgs,
+            };
+            let publisher = WiFiDirectAdvertisementPublisher::new().unwrap();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            publisher
+                .StatusChanged(&TypedEventHandler::new(
+                    move |_, args: Ref<WiFiDirectAdvertisementPublisherStatusChangedEventArgs>| {
+                        if let Ok(args) = args.ok() {
+                            let _ =
+                                tx.send(format!("{:?} error {:?}", args.Status()?, args.Error()?));
+                        }
+                        Ok(())
+                    },
+                ))
+                .unwrap();
+            let advertisement = publisher.Advertisement().unwrap();
+            advertisement
+                .SetIsAutonomousGroupOwnerEnabled(true)
+                .unwrap();
+            let legacy = advertisement.LegacySettings().unwrap();
+            legacy.SetIsEnabled(true).unwrap();
+            legacy.SetSsid(&HSTRING::from("DIRECT-Bm-spike")).unwrap();
+            let credential = PasswordCredential::new().unwrap();
+            credential
+                .SetPassword(&HSTRING::from("beam-spike-12345"))
+                .unwrap();
+            legacy.SetPassphrase(&credential).unwrap();
+
+            let before = lan_ips();
+            println!("addresses before: {before:?}");
+            publisher.Start().unwrap();
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_secs(20) {
+                if let Ok(Some(status)) =
+                    tokio::time::timeout(Duration::from_secs(1), rx.recv()).await
+                {
+                    println!("{:?} publisher: {status}", started.elapsed());
+                }
+                let now = lan_ips();
+                if now != before {
+                    println!("{:?} addresses now: {now:?}", started.elapsed());
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            println!("status after 3 s more: {:?}", publisher.Status());
+            println!("addresses: {:?}", lan_ips());
+            let wlan = std::process::Command::new("netsh")
+                .args(["wlan", "show", "interfaces"])
+                .output()
+                .unwrap();
+            for line in String::from_utf8_lossy(&wlan.stdout).lines() {
+                if line.contains("State") || line.contains(" SSID") || line.contains("Channel") {
+                    println!("  {}", line.trim());
+                }
+            }
+            publisher.Stop().unwrap();
         }
 
         #[tokio::test]
