@@ -381,11 +381,20 @@ fn bluetooth_handshake_through_the_api() {
     // The phone can call the laptop (which can't host a GATT service).
     // Not trusted, so it's keyed by its advertised id prefix.
     let key = format!("ble-{}", &laptop.device_id().replace('-', "")[..12]);
-    let call = phone.ble_call_advertisement(key).expect("heard it");
+    let call = phone.ble_call_advertisement(key.clone()).expect("heard it");
     assert_eq!(call.service_data.len(), 10);
     assert_ne!(call.service_data[8] & 0x20, 0, "the call flag");
     assert!(phone
         .ble_call_advertisement("ble-000000000000".into())
+        .is_none());
+    // Found on the LAN too, it can still be reached over Bluetooth.
+    let route = phone
+        .bluetooth_route(laptop.device_id())
+        .expect("heard over Bluetooth");
+    assert_eq!(route.link, NearbyLink::Bluetooth);
+    assert_eq!(route.device_id, key);
+    assert!(phone
+        .bluetooth_route("0000-0000-0000-0000".into())
         .is_none());
     let mut hello = b"BEAMHI01".to_vec();
     hello.extend([1, 2, 3, 4, 5, 6, 7, 8, 0x23, 0x28]);

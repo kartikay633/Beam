@@ -200,3 +200,23 @@ Bugs that took more than an hour to fix. For each one: symptom, root cause, fix.
   sender. Lesson: when one side gets a race fix, check whether the other
   direction has the same race.
 - **Phase:** 7
+
+## The laptop kept announcing its old network's addresses
+
+- **Symptom:** First device test. The phone, on the same network as the
+  laptop (the phone's own hotspot), failed to send with "KARTIKAY didn't
+  answer", and nothing appeared on the laptop. `beam-cli discover` showed
+  the laptop announcing 169.254.x (Tailscale), loopback and an IPv6
+  address, but not its Wi-Fi IPv4 address. Beam listens on IPv4 only, so
+  none of those reached it.
+- **Root cause:** Beam started while the laptop was on one Wi-Fi network,
+  and a minute later Windows moved it to another. `mdns-sd` checks for
+  address changes every 5 s, but here its daemon never started announcing
+  the new IPv4 address. Restarting Beam fixed it at once.
+- **Fix:** `Advertiser` and `Browser` (core/src/discovery.rs) check the
+  machine's IPv4 addresses every 3 s. When they change, each replaces its
+  `ServiceDaemon` with a fresh one: the advertiser re-registers, and the
+  browser reports what it had seen as lost and browses again. Separately,
+  a send to a LAN device that doesn't answer now falls back to Bluetooth,
+  on Android and Windows, when the device is in range.
+- **Phase:** 7

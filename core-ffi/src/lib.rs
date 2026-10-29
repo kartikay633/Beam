@@ -498,6 +498,20 @@ impl BeamNode {
         self.inner.ble_call_advertisement(&device_id)
     }
 
+    /// The same device as heard over Bluetooth, for a device found on the
+    /// LAN: the way to reach it when its LAN addresses don't answer (a
+    /// network that keeps devices apart, or addresses gone stale).
+    pub fn bluetooth_route(&self, device_id: String) -> Option<NearbyDevice> {
+        let entries = lock(&self.inner.ble_devices);
+        // Trusted devices are keyed by their id; others by the id prefix
+        // they advertise (see `ble_key`).
+        let prefix = device_id.replace('-', "");
+        entries
+            .get(&device_id)
+            .or_else(|| entries.get(&format!("ble-{}", prefix.get(..12)?)))
+            .map(|entry| entry.device.clone())
+    }
+
     /// A new GATT connection to our Beam service (we are the receiver).
     pub fn ble_server_session(&self) -> Arc<BleServerSession> {
         Arc::new(self.inner.ble_server_session())

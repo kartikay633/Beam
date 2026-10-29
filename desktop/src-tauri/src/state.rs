@@ -753,13 +753,13 @@ impl AppState {
             .parse::<DeviceId>()
             .ok()
             .is_some_and(|device_id| self.ui().nearby.contains_key(&device_id));
+        let status = |text: &str| {
+            self.update_transfer(id, |t| t.view.detail = Some(text.to_string()));
+            self.emit();
+        };
         let sighting = self.ui().ble.get(target).cloned();
         if let (false, Some(sighting)) = (on_lan, sighting) {
             let radio = self.radio().ok_or("Bluetooth isn't available")?;
-            let status = |text: &str| {
-                self.update_transfer(id, |t| t.view.detail = Some(text.to_string()));
-                self.emit();
-            };
             return radio
                 .connect(&sighting, &status)
                 .await
@@ -776,10 +776,31 @@ impl AppState {
                 .ok_or("that device is no longer on the network")?;
             (device.name.clone(), device.addresses.clone())
         };
-        let addr = first_reachable(&addresses)
+        if let Some(addr) = first_reachable(&addresses).await {
+            return Ok(Resolved::Address(addr, Some(device_id)));
+        }
+        // Its LAN addresses didn't answer (a network that keeps devices
+        // apart, or stale addresses): try Bluetooth if it's in range.
+        let unreachable = format!("\"{name}\" didn't answer on any of its addresses");
+        let (Some(sighting), Some(radio)) = (self.bluetooth_route(&device_id), self.radio()) else {
+            return Err(unreachable);
+        };
+        radio
+            .connect(&sighting, &status)
             .await
-            .ok_or_else(|| format!("\"{name}\" didn't answer on any of its addresses"))?;
-        Ok(Resolved::Address(addr, Some(device_id)))
+            .map(Resolved::Offline)
+    }
+
+    /// The Bluetooth sighting of a device found on the LAN. Trusted devices
+    /// are keyed by their id; others by the id prefix they advertise.
+    fn bluetooth_route(&self, device_id: &DeviceId) -> Option<BleSighting> {
+        let ui = self.ui();
+        let id = device_id.to_string();
+        let prefix = id.replace('-', "");
+        ui.ble
+            .get(&id)
+            .or_else(|| ui.ble.get(&format!("ble-{}", prefix.get(..12)?)))
+            .cloned()
     }
 
     fn on_send_event(&self, id: &str, event: SendEvent) {

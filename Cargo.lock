@@ -414,6 +414,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "hkdf",
+ "if-addrs",
  "mdns-sd",
  "proptest",
  "serde",

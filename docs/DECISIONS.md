@@ -816,3 +816,19 @@ write virtualization (`unvirtualizedResources`).
 - **Virtualization:** the "Send to → Beam" shortcut and the start-with-
   Windows entry must be visible to Explorer and Windows. Under MSIX they'd
   be written into the package's private copy of AppData and HKCU instead.
+
+## 2026-10-29 — A LAN device that doesn't answer is tried over Bluetooth
+
+**What:** When a device found on the LAN doesn't accept a connection on
+any of its addresses, the sender looks for the same device among its
+Bluetooth sightings (`BeamNode::bluetooth_route` on Android,
+`AppState::bluetooth_route` on Windows). If it finds one, it continues
+with the Bluetooth handshake instead of failing.
+
+**Why:** Being found on the LAN doesn't prove the device can be reached
+there. Campus and office networks often let mDNS through but block
+traffic between devices, and addresses go stale when a laptop changes
+networks. Bluetooth gives a second route. The handshake's own LAN check
+then picks the network if it does work in one direction, or the hotspot
+if not. Untrusted devices are keyed by the id prefix they advertise, so
+the lookup tries both keys.

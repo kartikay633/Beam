@@ -7,6 +7,7 @@ import dev.beam.core.BleAdvertisement
 import dev.beam.core.BleClientSession
 import dev.beam.core.BleConnectRequest
 import dev.beam.core.BleServerSession
+import dev.beam.core.NearbyDevice
 import dev.beam.core.OutgoingFile
 import dev.beam.core.TransferResult
 import dev.beam.core.TrustedDevice
@@ -20,6 +21,9 @@ class FakeNode(val listener: BeamListener, var mode: Visibility) : BeamNodeInter
     var pairResult: () -> TrustedDevice = { TrustedDevice("aaaa-bbbb-cccc-dddd", "ThinkPad", true) }
     val sent = mutableListOf<Pair<String, List<OutgoingFile>>>()
     var lan = emptyList<String>()
+    /** What `bluetoothRoute` finds, by device id. */
+    val routes = mutableMapOf<String, NearbyDevice>()
+    var sendToResult: () -> TransferResult = { TransferResult.COMPLETED }
 
     override fun cancel(transferId: String) {
         calls += "cancel $transferId"
@@ -104,7 +108,7 @@ class FakeNode(val listener: BeamListener, var mode: Visibility) : BeamNodeInter
         files: List<OutgoingFile>,
     ): TransferResult {
         sent += address to files
-        return sendResult()
+        return sendToResult()
     }
 
     override fun setLanAddresses(addresses: List<String>) {
@@ -112,4 +116,6 @@ class FakeNode(val listener: BeamListener, var mode: Visibility) : BeamNodeInter
     }
 
     override fun sharedLanAddress(request: BleConnectRequest): String? = null
+
+    override fun bluetoothRoute(deviceId: String): NearbyDevice? = routes[deviceId]
 }

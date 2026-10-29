@@ -209,7 +209,17 @@ class BeamRepository(
                 if (device.link == NearbyLink.BLUETOOTH) {
                     sendOffline(current, id, device, files)
                 } else {
-                    current.send(id, device.deviceId, files)
+                    try {
+                        current.send(id, device.deviceId, files)
+                    } catch (e: BeamException) {
+                        // Its LAN addresses didn't answer (a network that
+                        // keeps devices apart, or stale addresses): try
+                        // Bluetooth if it's in range.
+                        val route = current.bluetoothRoute(device.deviceId)
+                        if (route == null || radio?.available != true) throw e
+                        linking[id] = coroutineContext[Job]!!
+                        sendOffline(current, id, route, files)
+                    }
                 }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) {

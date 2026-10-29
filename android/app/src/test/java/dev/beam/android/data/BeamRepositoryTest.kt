@@ -245,6 +245,23 @@ class BeamRepositoryTest {
     }
 
     @Test
+    fun aLanDeviceThatDoesNotAnswerIsTriedOverBluetooth() = runTest(dispatcher) {
+        val repo = repository()
+        val radio = FakeRadio()
+        repo.radio = radio
+        repo.start()
+        node.sendResult = { throw BeamException.Failed("\"ThinkPad\" didn't answer") }
+        node.routes["aaaa-bbbb-cccc-dddd"] = ble("ble-aaaabbbbcccc", "ThinkPad")
+        val file = OutgoingFile("a.jpg", 0, FileSource.Path("/cache/a.jpg"))
+        repo.send(lan("aaaa-bbbb-cccc-dddd", "ThinkPad", trusted = false), listOf(file)) {}
+        advanceUntilIdle()
+        assertEquals("ble-aaaabbbbcccc", radio.connected.single().deviceId)
+        assertEquals("192.168.43.20:9000", node.sent.last().first)
+        assertTrue(radio.released)
+        assertTrue(repo.state.value.transfers.none { it.phase == Phase.FAILED })
+    }
+
+    @Test
     fun aBluetoothSendCanBeCancelledWhileItSetsUp() = runTest(dispatcher) {
         val repo = repository()
         val radio = FakeRadio(hang = true)

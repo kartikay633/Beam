@@ -287,9 +287,58 @@ pub fn interpret_service(
     )
 }
 
+/// How often to look for a new network (another Wi-Fi, a hotspot).
+const NETWORK_CHECK: Duration = Duration::from_secs(3);
+
+/// This machine's IPv4 addresses, sorted, to notice when the network
+/// changes. `mdns-sd` follows address changes itself, but missed a laptop
+/// moving from one Wi-Fi network to another and kept announcing the old
+/// addresses only, so the daemon is replaced when these change.
+fn network_ipv4s() -> Vec<IpAddr> {
+    let mut ips: Vec<IpAddr> = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|i| !i.is_loopback())
+        .map(|i| i.ip())
+        .filter(IpAddr::is_ipv4)
+        .collect();
+    ips.sort();
+    ips.dedup();
+    ips
+}
+
+/// The current daemon, and whether its owner has shut it down for good.
+type SharedDaemon = std::sync::Arc<std::sync::Mutex<(ServiceDaemon, bool)>>;
+
+fn shared(daemon: ServiceDaemon) -> SharedDaemon {
+    std::sync::Arc::new(std::sync::Mutex::new((daemon, false)))
+}
+
+fn shut_down(daemon: &SharedDaemon) {
+    let mut guard = daemon.lock().unwrap_or_else(|e| e.into_inner());
+    guard.1 = true;
+    let _ = guard.0.shutdown();
+}
+
+/// Swaps in `fresh` unless the owner has shut down, and shuts down the old one.
+fn replace(daemon: &SharedDaemon, fresh: ServiceDaemon) -> bool {
+    let mut guard = daemon.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.1 {
+        let _ = fresh.shutdown();
+        return false;
+    }
+    let old = std::mem::replace(&mut guard.0, fresh);
+    let _ = old.shutdown();
+    true
+}
+
+fn current_daemon(daemon: &SharedDaemon) -> ServiceDaemon {
+    daemon.lock().unwrap_or_else(|e| e.into_inner()).0.clone()
+}
+
 pub struct Advertiser {
     task: tokio::task::JoinHandle<()>,
-    daemon: ServiceDaemon,
+    daemon: SharedDaemon,
 }
 
 impl Advertiser {
@@ -298,7 +347,7 @@ impl Advertiser {
         port: u16,
         visibility: Visibility,
     ) -> Result<Advertiser, DiscoveryError> {
-        let daemon = ServiceDaemon::new()?;
+        let daemon = shared(ServiceDaemon::new()?);
         let task = tokio::spawn(advertise(daemon.clone(), me, port, visibility));
         Ok(Advertiser { task, daemon })
     }
@@ -307,14 +356,16 @@ impl Advertiser {
 impl Drop for Advertiser {
     fn drop(&mut self) {
         self.task.abort();
-        let _ = self.daemon.shutdown();
+        shut_down(&self.daemon);
     }
 }
 
-async fn advertise(daemon: ServiceDaemon, me: LocalDevice, port: u16, visibility: Visibility) {
+async fn advertise(shared: SharedDaemon, me: LocalDevice, port: u16, visibility: Visibility) {
     let mut changes = visibility.subscribe();
     let mut current: Option<(Announcement, String)> = None;
+    let mut network = network_ipv4s();
     loop {
+        let daemon = current_daemon(&shared);
         let mode = visibility.mode();
         let wanted = Announcement::of(&me, mode, current_window());
         if wanted.as_ref() != current.as_ref().map(|(a, _)| a) {
@@ -341,11 +392,28 @@ async fn advertise(daemon: ServiceDaemon, me: LocalDevice, port: u16, visibility
             }
         }
 
-        // Wake for an explicit change, the end of "everyone", or the next
-        // rotation window, whichever comes first.
-        tokio::select! {
-            _ = changes.changed() => {}
-            _ = tokio::time::sleep_until(next_announcement_change(&visibility)) => {}
+        // Wake for an explicit change, the end of "everyone", the next
+        // rotation window, or a new network, whichever comes first.
+        let deadline = next_announcement_change(&visibility);
+        loop {
+            tokio::select! {
+                _ = changes.changed() => break,
+                _ = tokio::time::sleep_until(deadline) => break,
+                _ = tokio::time::sleep(NETWORK_CHECK) => {}
+            }
+            let now = network_ipv4s();
+            if now != network {
+                network = now;
+                if let Some((_, fullname)) = current.take() {
+                    let _ = daemon.unregister(&fullname);
+                }
+                if let Ok(fresh) = ServiceDaemon::new() {
+                    if !replace(&shared, fresh) {
+                        return;
+                    }
+                }
+                break;
+            }
         }
     }
 }
@@ -359,7 +427,7 @@ pub enum DiscoveryEvent {
 /// Watches the local network for Beam devices.
 pub struct Browser {
     events: mpsc::UnboundedReceiver<DiscoveryEvent>,
-    daemon: ServiceDaemon,
+    daemon: SharedDaemon,
 }
 
 impl Browser {
@@ -367,13 +435,47 @@ impl Browser {
     /// to recognize trusted devices, including trusted-only ones.
     pub fn start(me: &LocalDevice, trust: TrustStore) -> Result<Browser, DiscoveryError> {
         let daemon = ServiceDaemon::new()?;
-        let receiver = daemon.browse(SERVICE_TYPE)?;
+        let mut receiver = daemon.browse(SERVICE_TYPE)?;
+        let daemon = shared(daemon);
         let (tx, events) = mpsc::unbounded_channel();
         let my_key = *me.identity.public_key();
+        let owner = daemon.clone();
         // The mdns-sd receiver is blocking; pump it from a thread.
         std::thread::spawn(move || {
             let mut by_fullname: HashMap<String, DeviceId> = HashMap::new();
-            while let Ok(event) = receiver.recv() {
+            let mut network = network_ipv4s();
+            let mut checked = std::time::Instant::now();
+            loop {
+                if checked.elapsed() >= NETWORK_CHECK {
+                    checked = std::time::Instant::now();
+                    let now = network_ipv4s();
+                    if now != network {
+                        network = now;
+                        // Browse afresh on the new network. What we saw on
+                        // the old one is gone; it'll be found again if not.
+                        let Ok(fresh) = ServiceDaemon::new() else {
+                            continue;
+                        };
+                        let Ok(browsing) = fresh.browse(SERVICE_TYPE) else {
+                            let _ = fresh.shutdown();
+                            continue;
+                        };
+                        if !replace(&owner, fresh) {
+                            break;
+                        }
+                        receiver = browsing;
+                        for (_, id) in by_fullname.drain() {
+                            if tx.send(DiscoveryEvent::Lost(id)).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+                let event = match receiver.recv_timeout(Duration::from_millis(500)) {
+                    Ok(event) => event,
+                    Err(_) if receiver.is_disconnected() => break,
+                    Err(_) => continue,
+                };
                 let out = match event {
                     ServiceEvent::ServiceResolved(service) => {
                         let txt: HashMap<String, String> = service
@@ -418,7 +520,7 @@ impl Browser {
 
 impl Drop for Browser {
     fn drop(&mut self) {
-        let _ = self.daemon.shutdown();
+        shut_down(&self.daemon);
     }
 }
 
