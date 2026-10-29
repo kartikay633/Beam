@@ -100,6 +100,12 @@ pub(super) async fn run(
                     transfer_id: plan.transfer_id,
                     reason: "cancelled by the sender".into(),
                 })).await;
+                // Close gracefully (see `linger_after_cancel`).
+                let _ = conn.shutdown().await;
+                let _ = tokio::time::timeout(LINGER_AFTER_CANCEL, async {
+                    while conn.read_frame().await.is_ok() {}
+                })
+                .await;
                 return Err(TransferError::CancelledByUser);
             }
         };
@@ -256,6 +262,7 @@ pub(super) async fn run(
                             transfer_id: plan.transfer_id,
                             reason: err.to_string(),
                         })).await;
+                        linger_after_cancel(&mut control, &mut frames).await;
                         return Err(err);
                     }
                     history.resent_chunks += 1;
@@ -314,10 +321,32 @@ pub(super) async fn run(
                     transfer_id: plan.transfer_id,
                     reason: "cancelled by the sender".into(),
                 })).await;
+                linger_after_cancel(&mut control, &mut frames).await;
                 return Err(TransferError::CancelledByUser);
             }
         }
     }
+}
+
+/// How long a sender waits, after sending CANCEL, for the receiver to close.
+const LINGER_AFTER_CANCEL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// After sending CANCEL: close our side gracefully, then let the receiver
+/// close its own. Dropping a socket while the receiver's acks are still
+/// arriving (unread) makes the OS send a reset instead, and a reset can
+/// destroy the CANCEL before the receiver reads it; it then takes the cut
+/// for a network drop and waits for a resume that never comes.
+async fn linger_after_cancel<W>(
+    control: &mut FrameWriter<W>,
+    frames: &mut tokio::sync::mpsc::Receiver<Result<Frame, TransferError>>,
+) where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let _ = control.shutdown().await;
+    let _ = tokio::time::timeout(LINGER_AFTER_CANCEL, async {
+        while let Some(Ok(_)) = frames.recv().await {}
+    })
+    .await;
 }
 
 /// Sends FILE_DONE for every file that is fully acknowledged and whose

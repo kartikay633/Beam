@@ -281,3 +281,25 @@ Bugs that took more than an hour to fix. For each one: symptom, root cause, fix.
 - **Lesson:** "Every N seconds" is a promise about time, not about data.
   On fast links, bound by both.
 - **Phase:** 8
+
+## Closing a socket with unread data can destroy the CANCEL
+
+- **Symptom:** `sender_can_cancel_mid_transfer` hung once more on Windows
+  CI (the receiver never finished), after the deterministic test for the
+  late-CANCEL race passed in the same run.
+- **Likely cause (not reproduced locally):** The sender wrote CANCEL and
+  returned at once, dropping its control connection while the receiver's
+  CHUNK_ACKs were still arriving. Closing a TCP socket with unread received
+  data makes the OS send a reset (RST) instead of a normal close. A
+  receiver that gets the reset before reading may lose the CANCEL still in
+  its buffer (Windows discards it), and then takes the cut for a network
+  drop.
+- **Fix:** After sending CANCEL, the sender shuts down its write side (a
+  normal FIN after the CANCEL), then keeps reading the control connection
+  for up to 1 s until the receiver closes it. This applies to all three
+  places the sender cancels.
+- **Status:** 36 parallel runs of the cancel tests pass locally, but so did
+  the old code. CI over several runs is the real check. If it recurs, look
+  at the receiver's resume wait, which has no timeout for a sender that
+  never comes back.
+- **Phase:** 8
