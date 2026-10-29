@@ -309,13 +309,14 @@ async fn resume_after_the_receiver_restarts() {
         })
     };
 
-    // Let roughly a quarter arrive, then pull the plug on the receiver.
-    while progress.load(std::sync::atomic::Ordering::Relaxed) < 100_000_000 {
+    // Let well over a third arrive, then pull the plug on the receiver.
+    while progress.load(std::sync::atomic::Ordering::Relaxed) < 150_000_000 {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     // A crash keeps only what the progress file records. It's saved every
-    // 64 MB as well as every 2 s, so however fast the link, most of the
-    // 100 MB is in it already.
+    // 2 s and after every 64 MiB (`CHECKPOINT_BYTES`) since the last save,
+    // so however fast the link it lags by less than 64 MiB: of 150 MB,
+    // over 80 MB are in it.
     assert!(
         checkpointed_bytes(&inbox) >= 50_000_000,
         "progress saved before the crash: {} bytes",
