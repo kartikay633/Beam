@@ -1,20 +1,14 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { api, isTauri, onSnapshot, type Snapshot, type VisibilityMode } from "./api";
+import { useEffect, useRef, useState } from "react";
+import { api, onSnapshot, type Snapshot, type VisibilityMode } from "./api";
 import { Home } from "./Home";
 import { PairPage } from "./Pair";
 import { SettingsPage } from "./SettingsPage";
-import { TrustedPage } from "./Trusted";
-import { formatDuration } from "./format";
-import { BeamLogo, GearIcon, HomeIcon, QrIcon, ShieldIcon } from "./icons";
+import { formatMinutesLeft } from "./format";
+import { BeamLogo, CheckIcon, ChevronDownIcon, ChevronLeftIcon, QrIcon, SlidersIcon } from "./icons";
 
-type Page = "home" | "trusted" | "pair" | "settings";
+type Page = "home" | "pair" | "settings";
 
-const PAGES: { id: Page; label: string; icon: ReactNode }[] = [
-  { id: "home", label: "Send & receive", icon: <HomeIcon /> },
-  { id: "trusted", label: "Trusted devices", icon: <ShieldIcon /> },
-  { id: "pair", label: "Pair a phone", icon: <QrIcon /> },
-  { id: "settings", label: "Settings", icon: <GearIcon /> },
-];
+const TITLES: Record<Page, string> = { home: "Beam", pair: "Pair a phone", settings: "Settings" };
 
 /** The latest snapshot from the backend, kept up to date. */
 export function useSnapshot(): Snapshot | null {
@@ -37,35 +31,39 @@ export function App() {
   }
   return (
     <div className="app">
-      <aside className="sidebar">
-        <div className="brand">
-          <BeamLogo size={26} />
-          <span>Beam</span>
-          {!isTauri && <span className="demo-badge">demo</span>}
-        </div>
-        <nav>
-          {PAGES.map((p) => (
-            <button
-              key={p.id}
-              className={`nav-item ${page === p.id ? "active" : ""}`}
-              onClick={() => setPage(p.id)}
-            >
-              {p.icon}
-              {p.label}
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-footer">
-          <VisibilitySwitch snapshot={snapshot} />
-          <div className="me">
-            <div className="me-name">{snapshot.me.name}</div>
-            <div className="me-id mono">{snapshot.me.deviceId}</div>
+      <header className="topbar">
+        {page === "home" ? (
+          <div className="brand">
+            <BeamLogo size={26} />
+            <span>Beam</span>
           </div>
-        </div>
-      </aside>
+        ) : (
+          <button className="back" onClick={() => setPage("home")}>
+            <ChevronLeftIcon size={18} />
+            <span>{TITLES[page]}</span>
+          </button>
+        )}
+        <span className="grow" />
+        <VisibilityChip snapshot={snapshot} />
+        <button
+          className={`icon-button ${page === "pair" ? "current" : ""}`}
+          aria-label="Pair a phone"
+          title="Pair a phone"
+          onClick={() => setPage(page === "pair" ? "home" : "pair")}
+        >
+          <QrIcon size={19} />
+        </button>
+        <button
+          className={`icon-button ${page === "settings" ? "current" : ""}`}
+          aria-label="Settings"
+          title="Settings"
+          onClick={() => setPage(page === "settings" ? "home" : "settings")}
+        >
+          <SlidersIcon size={19} />
+        </button>
+      </header>
       <main className="content">
         {page === "home" && <Home snapshot={snapshot} />}
-        {page === "trusted" && <TrustedPage snapshot={snapshot} />}
         {page === "pair" && <PairPage />}
         {page === "settings" && <SettingsPage snapshot={snapshot} />}
       </main>
@@ -73,38 +71,67 @@ export function App() {
   );
 }
 
-const MODES: { id: VisibilityMode; label: string }[] = [
-  { id: "everyone", label: "Everyone" },
-  { id: "trusted", label: "Trusted" },
-  { id: "off", label: "Off" },
+const MODES: { id: VisibilityMode; label: string; hint: string }[] = [
+  { id: "everyone", label: "Everyone", hint: "Anyone nearby can find you, for 10 minutes" },
+  { id: "trusted", label: "Trusted devices", hint: "Only devices you trust can find you" },
+  { id: "off", label: "Hidden", hint: "Nobody can find or send to you" },
 ];
 
-function VisibilitySwitch({ snapshot }: { snapshot: Snapshot }) {
+/** "Visible to everyone · 9 min": opens a menu to change who can see you. */
+function VisibilityChip({ snapshot }: { snapshot: Snapshot }) {
   const { mode, everyoneUntilMs } = snapshot.visibility;
   const remaining = useCountdown(everyoneUntilMs);
-  const hint =
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent | KeyboardEvent) => {
+      if (e instanceof KeyboardEvent ? e.key === "Escape" : !ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", close);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", close);
+    };
+  }, [open]);
+
+  const label =
     mode === "everyone"
-      ? `Anyone nearby can find you${remaining ? ` · ${formatDuration(remaining)} left` : ""}`
+      ? `Visible to everyone${remaining ? ` · ${formatMinutesLeft(remaining)}` : ""}`
       : mode === "trusted"
-        ? "Only your trusted devices can find you"
-        : "Nobody can find or send to you";
+        ? "Visible to trusted devices"
+        : "Hidden";
   return (
-    <div className="visibility">
-      <div className="label">Who can see me</div>
-      <div className="segmented" role="radiogroup" aria-label="Visibility">
-        {MODES.map((m) => (
-          <button
-            key={m.id}
-            role="radio"
-            aria-checked={mode === m.id}
-            className={mode === m.id ? `on ${m.id}` : ""}
-            onClick={() => api.setVisibility(m.id)}
-          >
-            {m.label}
-          </button>
-        ))}
-      </div>
-      <div className="hint">{hint}</div>
+    <div className="chip-menu" ref={ref}>
+      <button className="chip" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <span className={`dot ${mode}`} />
+        {label}
+        <ChevronDownIcon size={14} />
+      </button>
+      {open && (
+        <div className="menu" role="menu">
+          {MODES.map((m) => (
+            <button
+              key={m.id}
+              role="menuitemradio"
+              aria-checked={mode === m.id}
+              onClick={() => {
+                api.setVisibility(m.id);
+                setOpen(false);
+              }}
+            >
+              <span className={`dot ${m.id}`} />
+              <span className="menu-text">
+                <span>{m.label}</span>
+                <small>{m.hint}</small>
+              </span>
+              {mode === m.id && <CheckIcon size={16} />}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

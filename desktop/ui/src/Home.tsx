@@ -4,46 +4,75 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api, isTauri, type Device, type Snapshot } from "./api";
 import { Transfers } from "./Transfers";
 import { formatBytes } from "./format";
-import { CloseIcon, DeviceIcon, FileIcon, LaptopIcon, PhoneIcon, RadarIcon, UploadIcon } from "./icons";
+import { BluetoothIcon, CloseIcon, DeviceIcon, FileIcon, LaptopIcon, PhoneIcon, PlusIcon, UploadIcon } from "./icons";
 
 export function Home({ snapshot }: { snapshot: Snapshot }) {
   const [error, setError] = useState<string | null>(null);
-  const send = (target: string) => {
-    setError(null);
-    api.send(target).catch((e) => setError(String(e)));
+  const dragging = useWindowDrop();
+
+  /** Asks for files and stages them; false when the user picked none. */
+  const choose = async (): Promise<boolean> => {
+    if (!isTauri) {
+      await api.stage(["C:\\Users\\you\\Pictures\\holiday.jpg", "C:\\Users\\you\\Documents\\notes.txt"]);
+      return true;
+    }
+    const picked = await open({ multiple: true, title: "Choose files to send" });
+    if (!picked || (Array.isArray(picked) && picked.length === 0)) return false;
+    await api.stage(Array.isArray(picked) ? picked : [picked]);
+    return true;
   };
+
+  /** Sends what's staged, asking for files first when nothing is. */
+  const sendTo = async (target: string) => {
+    setError(null);
+    try {
+      if (snapshot.staged.length === 0 && !(await choose())) return;
+      await api.send(target);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   return (
     <div className="page">
-      <header className="page-header">
-        <h1>Send &amp; receive</h1>
-        <p className="muted">
-          Drop files, pick a device. Files sent to you are saved in{" "}
-          <button className="link" onClick={() => api.openFolder()}>
-            {snapshot.settings.downloadDir}
-          </button>
-          .
-        </p>
-      </header>
-      <DropZone snapshot={snapshot} />
-      {error && <div className="banner error">{error}</div>}
-      {snapshot.notice && (
-        <div className="banner error with-action">
-          <span>{snapshot.notice}</span>
-          <button className="ghost small" onClick={() => api.dismissNotice()}>
+      {dragging && (
+        <div className="drop-overlay" aria-hidden="true">
+          <UploadIcon size={28} />
+          <span>Drop to add files</span>
+        </div>
+      )}
+      {error && (
+        <div className="notice error" role="alert">
+          <span>{error}</span>
+          <button className="text-button" onClick={() => setError(null)}>
             Dismiss
           </button>
         </div>
       )}
-      <NearbyDevices snapshot={snapshot} onSend={send} />
+      {snapshot.notice && (
+        <div className="notice error" role="alert">
+          <span>{snapshot.notice}</span>
+          <button className="text-button" onClick={() => api.dismissNotice()}>
+            Dismiss
+          </button>
+        </div>
+      )}
+      <SendPanel snapshot={snapshot} onChoose={choose} />
+      <NearbyDevices snapshot={snapshot} onSend={sendTo} />
       <Transfers transfers={snapshot.transfers} />
+      <p className="footnote">
+        Received files go to <span className="path">{snapshot.settings.downloadDir}</span> ·{" "}
+        <button className="text-button" onClick={() => api.openFolder()}>
+          Open folder
+        </button>
+      </p>
     </div>
   );
 }
 
-function DropZone({ snapshot }: { snapshot: Snapshot }) {
+/** Whether files are being dragged over the window; dropped files are staged. */
+function useWindowDrop(): boolean {
   const [dragging, setDragging] = useState(false);
-
-  // Files dragged from Explorer onto the window.
   useEffect(() => {
     if (!isTauri) return;
     let stop: (() => void) | undefined;
@@ -59,53 +88,52 @@ function DropZone({ snapshot }: { snapshot: Snapshot }) {
       .then((unlisten) => (stop = unlisten));
     return () => stop?.();
   }, []);
+  return dragging;
+}
 
-  const choose = async () => {
-    if (!isTauri) {
-      api.stage(["C:\\Users\\you\\Pictures\\holiday.jpg", "C:\\Users\\you\\Documents\\notes.txt"]);
-      return;
-    }
-    const picked = await open({ multiple: true, title: "Choose files to send" });
-    if (picked) api.stage(Array.isArray(picked) ? picked : [picked]);
-  };
-
+function SendPanel({ snapshot, onChoose }: { snapshot: Snapshot; onChoose: () => Promise<boolean> }) {
   const staged = snapshot.staged;
   if (staged.length === 0) {
     return (
-      <button className={`dropzone ${dragging ? "dragging" : ""}`} onClick={choose}>
-        <UploadIcon size={28} />
-        <strong>Drop files here</strong>
-        <span className="muted">or click to choose · or right-click a file in Explorer → Send to → Beam</span>
-      </button>
+      <section className="send-strip" aria-label="Send files">
+        <div className="tile">
+          <UploadIcon size={20} />
+        </div>
+        <div className="grow">
+          <p className="strong">Drop files anywhere to send</p>
+          <p className="secondary">Or right-click any file in Explorer, then Send to › Beam</p>
+        </div>
+        <button className="button" onClick={onChoose}>
+          Choose files
+        </button>
+      </section>
     );
   }
   const total = staged.reduce((sum, f) => sum + f.size, 0);
   return (
-    <section className={`staged ${dragging ? "dragging" : ""}`}>
+    <section className="staged" aria-label="Files to send">
       <div className="staged-header">
-        <div>
-          <strong>
-            {staged.length} file{staged.length === 1 ? "" : "s"} ready
-          </strong>
-          <span className="muted"> · {formatBytes(total)} · now pick a device below</span>
+        <div className="grow">
+          <p className="strong">
+            {staged.length} file{staged.length === 1 ? "" : "s"} ready · {formatBytes(total)}
+          </p>
+          <p className="secondary">Pick a device to send {staged.length === 1 ? "it" : "them"} to</p>
         </div>
-        <div className="row-actions">
-          <button className="ghost" onClick={choose}>
-            Add more
-          </button>
-          <button className="ghost" onClick={() => api.unstage()}>
-            Clear
-          </button>
-        </div>
+        <button className="text-button" onClick={onChoose}>
+          <PlusIcon size={15} /> Add more
+        </button>
+        <button className="text-button" onClick={() => api.unstage()}>
+          Clear
+        </button>
       </div>
-      <ul className="chips">
+      <ul className="file-chips">
         {staged.map((file) => (
-          <li key={file.path} className="chip" title={file.path}>
-            <FileIcon size={16} />
-            <span className="chip-name">{file.name}</span>
-            <span className="muted">{formatBytes(file.size)}</span>
-            <button className="icon-button" aria-label={`Remove ${file.name}`} onClick={() => api.unstage(file.path)}>
-              <CloseIcon size={14} />
+          <li key={file.path} title={file.path}>
+            <FileIcon size={15} />
+            <span className="ellipsis">{file.name}</span>
+            <span className="secondary">{formatBytes(file.size)}</span>
+            <button className="chip-remove" aria-label={`Remove ${file.name}`} onClick={() => api.unstage(file.path)}>
+              <CloseIcon size={13} />
             </button>
           </li>
         ))}
@@ -116,78 +144,84 @@ function DropZone({ snapshot }: { snapshot: Snapshot }) {
 
 function NearbyDevices({ snapshot, onSend }: { snapshot: Snapshot; onSend: (target: string) => void }) {
   const [address, setAddress] = useState("");
-  const ready = snapshot.staged.length > 0;
+  const [byAddress, setByAddress] = useState(false);
+  const count = snapshot.staged.length;
   return (
-    <section>
+    <section aria-labelledby="nearby">
       <div className="section-header">
-        <h2>Nearby</h2>
-        <span className="muted small">
+        <h2 id="nearby">Nearby</h2>
+        <span className="secondary">
           {snapshot.bluetoothProblem
-            ? `On this network · Bluetooth unavailable: ${snapshot.bluetoothProblem}`
-            : "On this network, or close by over Bluetooth"}
+            ? `Same Wi-Fi only · Bluetooth unavailable: ${snapshot.bluetoothProblem}`
+            : "Same Wi-Fi, or close by over Bluetooth"}
         </span>
       </div>
-      {snapshot.nearby.length === 0 ? (
-        <div className="empty">
-          <RadarIcon size={28} />
-          <div>
-            <strong>Looking for devices…</strong>
-            <div className="muted small">
-              Open Beam on your phone. It shows up here on the same Wi-Fi, or over Bluetooth when you share no
-              network. Devices set to "trusted only" appear once you trust each other.
+      <div className="list">
+        {snapshot.nearby.length === 0 ? (
+          <div className="list-empty">
+            <span className="searching" aria-hidden="true" />
+            <div>
+              <p className="strong">Looking for devices…</p>
+              <p className="secondary">
+                Open Beam on your phone. It shows up here on the same Wi-Fi, or over Bluetooth with no shared network.
+              </p>
             </div>
           </div>
-        </div>
+        ) : (
+          snapshot.nearby.map((device) => (
+            <DeviceRow key={device.deviceId} device={device} count={count} onSend={onSend} />
+          ))
+        )}
+      </div>
+      {byAddress ? (
+        <form
+          className="address-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (address.trim()) onSend(address.trim());
+          }}
+        >
+          <input
+            value={address}
+            onChange={(e) => setAddress(e.target.value)}
+            placeholder="192.168.1.20:9000"
+            aria-label="Address to send to"
+            autoFocus
+          />
+          <button type="submit" className="button">
+            Send
+          </button>
+          <button type="button" className="text-button" onClick={() => setByAddress(false)}>
+            Cancel
+          </button>
+        </form>
       ) : (
-        <div className="device-grid">
-          {snapshot.nearby.map((device) => (
-            <DeviceCard key={device.deviceId} device={device} ready={ready} onSend={onSend} />
-          ))}
-        </div>
-      )}
-      <form
-        className="address-form"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (address.trim()) onSend(address.trim());
-        }}
-      >
-        <span className="muted small">Not listed? Send to an address:</span>
-        <input
-          value={address}
-          onChange={(e) => setAddress(e.target.value)}
-          placeholder="192.168.1.20:9000"
-          aria-label="Receiver address"
-        />
-        <button type="submit" className="ghost" disabled={!ready || !address.trim()}>
-          Send
+        <button className="text-button subtle" onClick={() => setByAddress(true)}>
+          Send to an address instead
         </button>
-      </form>
+      )}
     </section>
   );
 }
 
-function DeviceCard({ device, ready, onSend }: { device: Device; ready: boolean; onSend: (target: string) => void }) {
+function DeviceRow({ device, count, onSend }: { device: Device; count: number; onSend: (target: string) => void }) {
   const icon =
-    device.kind === "phone" ? <PhoneIcon size={26} /> : device.kind === "laptop" ? <LaptopIcon size={26} /> : <DeviceIcon size={26} />;
+    device.kind === "phone" ? <PhoneIcon size={20} /> : device.kind === "laptop" ? <LaptopIcon size={20} /> : <DeviceIcon size={20} />;
+  const details = [device.trusted ? "Trusted" : null, device.link === "bluetooth" ? "No Wi-Fi needed" : "Same Wi-Fi"]
+    .filter(Boolean)
+    .join(" · ");
   return (
-    <div className="device-card" title={device.deviceId}>
-      <div className="device-avatar">{icon}</div>
-      <div className="device-info">
-        <div className="device-name">{device.name}</div>
-        <div className="muted small">
-          {device.kind === "phone" ? "Phone" : device.kind === "laptop" ? "Computer" : "Device"}
-          {device.trusted ? " · Trusted" : ""}
-          {device.link === "bluetooth" ? " · No Wi-Fi needed" : ""}
-        </div>
+    <div className="row" title={device.deviceId}>
+      <div className="tile">{icon}</div>
+      <div className="grow">
+        <p className="strong">{device.name}</p>
+        <p className="secondary with-icon">
+          {device.link === "bluetooth" && <BluetoothIcon size={12} />}
+          {details}
+        </p>
       </div>
-      <button
-        className="primary"
-        disabled={!ready}
-        title={ready ? `Send to ${device.name}` : "Choose some files first"}
-        onClick={() => onSend(device.deviceId)}
-      >
-        Send
+      <button className="button primary" onClick={() => onSend(device.deviceId)}>
+        {count === 0 ? "Send files" : `Send ${count} file${count === 1 ? "" : "s"}`}
       </button>
     </div>
   );

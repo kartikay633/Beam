@@ -85,8 +85,7 @@ fun PairScreen(vm: BeamViewModel, onClose: () -> Unit) {
         Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("Pair with a laptop", style = MaterialTheme.typography.headlineSmall)
-        Text("On the laptop, open Beam and choose \"Pair a phone\", then point the camera at the QR code.")
+        Text("On the laptop, open Beam and click the pair icon at the top, then point the camera at the QR code.")
 
         when (val s = step) {
             PairStep.Scanning -> when {

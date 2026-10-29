@@ -29,15 +29,15 @@ private val Light = lightColorScheme(
     onTertiary = Color.White,
     tertiaryContainer = Color(0xFFE4E6EA),
     onTertiaryContainer = Ink,
-    background = Color(0xFFF7F7F8),
+    background = Color(0xFFF4F5F7),
     onBackground = Ink,
-    surface = Color(0xFFF7F7F8),
+    surface = Color(0xFFF4F5F7),
     onSurface = Ink,
     surfaceVariant = Color(0xFFF1F2F4),
-    onSurfaceVariant = Color(0xFF5F6570),
+    onSurfaceVariant = Color(0xFF5F6672),
     surfaceTint = Color.Transparent,
     outline = Color(0xFFC9CCD1),
-    outlineVariant = Color(0xFFE4E5E8),
+    outlineVariant = Color(0xFFE4E6EA),
     surfaceBright = Color.White,
     surfaceDim = Color(0xFFE9EAEC),
     surfaceContainerLowest = Color.White,
@@ -45,10 +45,10 @@ private val Light = lightColorScheme(
     surfaceContainer = Color.White,
     surfaceContainerHigh = Color(0xFFF1F2F4),
     surfaceContainerHighest = Color(0xFFECEEF1),
-    error = Color(0xFFC4321F),
+    error = Color(0xFFB42318),
     onError = Color.White,
-    errorContainer = Color(0xFFFBE7E4),
-    onErrorContainer = Color(0xFF6E1A0F),
+    errorContainer = Color(0xFFFCEDEB),
+    onErrorContainer = Color(0xFFB42318),
 )
 
 private val Dark = darkColorScheme(
@@ -65,9 +65,9 @@ private val Dark = darkColorScheme(
     onTertiary = Ink,
     tertiaryContainer = Color(0xFF2A2E35),
     onTertiaryContainer = Color(0xFFECEDEF),
-    background = Color(0xFF0F1114),
+    background = Color(0xFF111317),
     onBackground = Color(0xFFECEDEF),
-    surface = Color(0xFF0F1114),
+    surface = Color(0xFF111317),
     onSurface = Color(0xFFECEDEF),
     surfaceVariant = Color(0xFF1E2227),
     onSurfaceVariant = Color(0xFF9AA0AA),
@@ -77,15 +77,24 @@ private val Dark = darkColorScheme(
     surfaceBright = Color(0xFF23272D),
     surfaceDim = Color(0xFF0F1114),
     surfaceContainerLowest = Color(0xFF0B0D0F),
-    surfaceContainerLow = Color(0xFF16191D),
-    surfaceContainer = Color(0xFF16191D),
+    surfaceContainerLow = Color(0xFF1A1D22),
+    surfaceContainer = Color(0xFF1A1D22),
     surfaceContainerHigh = Color(0xFF1E2227),
     surfaceContainerHighest = Color(0xFF23272D),
-    error = Color(0xFFF0705E),
+    error = Color(0xFFF0857A),
     onError = Ink,
-    errorContainer = Color(0xFF3A1A15),
-    onErrorContainer = Color(0xFFFBD5CF),
+    errorContainer = Color(0xFF3A1D1A),
+    onErrorContainer = Color(0xFFF0857A),
 )
+
+/** Colours Material has no role for: success, and the tile behind icons. */
+object BeamColors {
+    val ok: Color @Composable get() = if (isSystemInDarkTheme()) Color(0xFF5CC28C) else Color(0xFF1F7A4D)
+    val okContainer: Color @Composable get() = if (isSystemInDarkTheme()) Color(0xFF173226) else Color(0xFFE7F3EC)
+    val tile: Color @Composable get() = if (isSystemInDarkTheme()) Color(0xFF24282F) else Color(0xFFF1F2F4)
+    val divider: Color @Composable get() = if (isSystemInDarkTheme()) Color(0xFF24272D) else Color(0xFFEEF0F2)
+    val secondaryText: Color @Composable get() = if (isSystemInDarkTheme()) Color(0xFFC9CDD4) else Color(0xFF3A404B)
+}
 
 private val BeamTypography = Typography().run {
     copy(

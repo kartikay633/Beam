@@ -25,7 +25,7 @@ type P = { size?: number };
 /** The Beam logo: the mark (two points joined by a beam) on an ink square. */
 export const BeamLogo = ({ size = 28 }: P) => (
   <svg width={size} height={size} viewBox="0 0 100 100" aria-hidden="true">
-    <rect width="100" height="100" rx="22.5" fill="#14171C" />
+    <rect className="logo-bg" width="100" height="100" rx="22.5" fill="#14171C" />
     <g transform="translate(15 15) scale(0.7)" fill="#FFFFFF">
       <circle cx="24" cy="50" r="13" />
       <circle cx="76" cy="50" r="13" />
@@ -52,12 +52,6 @@ export const DeviceIcon = (p: P) => (
     <circle cx="12" cy="12" r="2.5" />
   </Icon>
 );
-export const HomeIcon = (p: P) => (
-  <Icon {...p}>
-    <path d="M4 11.5 12 5l8 6.5" />
-    <path d="M6 10v9h12v-9" />
-  </Icon>
-);
 export const ShieldIcon = (p: P) => (
   <Icon {...p}>
     <path d="M12 3 5 6v6c0 4.2 3 7.4 7 9 4-1.6 7-4.8 7-9V6z" />
@@ -70,12 +64,6 @@ export const QrIcon = (p: P) => (
     <rect x="14" y="4" width="6" height="6" rx="1" />
     <rect x="4" y="14" width="6" height="6" rx="1" />
     <path d="M14 14h2v2h-2zM18 18h2v2h-2zM14 18h2M18 14h2" />
-  </Icon>
-);
-export const GearIcon = (p: P) => (
-  <Icon {...p}>
-    <circle cx="12" cy="12" r="3" />
-    <path d="M12 2.5v2.5M12 19v2.5M4.6 4.6l1.8 1.8M17.6 17.6l1.8 1.8M2.5 12H5M19 12h2.5M4.6 19.4l1.8-1.8M17.6 6.4l1.8-1.8" />
   </Icon>
 );
 export const UploadIcon = (p: P) => (
@@ -111,10 +99,40 @@ export const FileIcon = (p: P) => (
     <path d="M14 3v5h5" />
   </Icon>
 );
-export const RadarIcon = (p: P) => (
+export const SlidersIcon = (p: P) => (
   <Icon {...p}>
-    <circle cx="12" cy="12" r="8" />
-    <circle cx="12" cy="12" r="4" />
-    <circle cx="12" cy="12" r="0.8" fill="currentColor" />
+    <path d="M4 7h10M18 7h2M4 17h4M12 17h8" />
+    <circle cx="16" cy="7" r="2" />
+    <circle cx="10" cy="17" r="2" />
+  </Icon>
+);
+export const BluetoothIcon = (p: P) => (
+  <Icon {...p}>
+    <path d="m7 7 10 10-5 5V2l5 5L7 17" />
+  </Icon>
+);
+export const CheckIcon = (p: P) => (
+  <Icon {...p}>
+    <path d="m5 12 5 5 9-10" />
+  </Icon>
+);
+export const AlertIcon = (p: P) => (
+  <Icon {...p}>
+    <path d="M12 7v6M12 17h.01" />
+  </Icon>
+);
+export const ChevronDownIcon = (p: P) => (
+  <Icon {...p}>
+    <path d="m6 9 6 6 6-6" />
+  </Icon>
+);
+export const ChevronLeftIcon = (p: P) => (
+  <Icon {...p}>
+    <path d="m15 6-6 6 6 6" />
+  </Icon>
+);
+export const PlusIcon = (p: P) => (
+  <Icon {...p}>
+    <path d="M12 5v14M5 12h14" />
   </Icon>
 );

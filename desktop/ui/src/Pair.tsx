@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, isTauri, type PairingInfo } from "./api";
+import { CheckIcon } from "./icons";
 
 export function PairPage() {
   const [info, setInfo] = useState<PairingInfo | null>(null);
@@ -19,36 +20,35 @@ export function PairPage() {
     return () => stop?.();
   }, []);
   return (
-    <div className="page">
-      <header className="page-header">
-        <h1>Pair a phone</h1>
-        <p className="muted">
-          Scan this code with Beam on your phone. Your phone learns this computer's key, so the two trust each other
-          and can always find each other, even in "trusted only" mode.
-        </p>
-      </header>
-      {paired && <div className="banner ok">Paired with {paired}. It can now send to you without asking.</div>}
+    <div className="page narrow">
+      {paired && (
+        <div className="notice ok" role="status">
+          <CheckIcon size={16} />
+          <span>Paired with {paired}. It can now send to you without asking.</span>
+        </div>
+      )}
       {info && (
-        <div className="pair">
+        <section className="pair-card">
           {/* The SVG comes from our own backend (the qrcode crate). */}
           <div className="qr" dangerouslySetInnerHTML={{ __html: info.svg }} />
-          <dl className="pair-details">
-            <dt>Device id</dt>
-            <dd className="mono">{info.deviceId}</dd>
-            <dt>Addresses</dt>
-            <dd className="mono">{info.addresses.length ? info.addresses.join(", ") : "not on a network"}</dd>
-            <dt>Valid for</dt>
-            <dd>
-              {Math.round(info.validForSecs / 60)} minutes, one phone.{" "}
-              <button className="link" onClick={() => api.pairing().then(setInfo)}>
+          <div className="grow pair-steps">
+            <h1>Pair a phone</h1>
+            <ol>
+              <li>Open Beam on your phone.</li>
+              <li>Tap the pair icon at the top, then scan this code.</li>
+              <li>
+                Check the phone shows <span className="mono">{info.deviceId}</span>.
+              </li>
+            </ol>
+            <p className="secondary">
+              Paired devices trust each other: they always find each other, even when set to trusted devices only.
+            </p>
+            <div className="pair-actions">
+              <button className="text-button" onClick={() => api.pairing().then(setInfo)}>
                 New code
               </button>
-            </dd>
-            <dt>No camera?</dt>
-            <dd>
-              {/* The phone can paste this instead of scanning. */}
               <button
-                className="link"
+                className="text-button"
                 onClick={() =>
                   navigator.clipboard.writeText(info.uri).then(() => {
                     setCopied(true);
@@ -58,14 +58,13 @@ export function PairPage() {
               >
                 {copied ? "Copied" : "Copy pairing link"}
               </button>
-            </dd>
-            <dt>Check</dt>
-            <dd className="muted small">
-              After scanning, your phone should show the same device id. If it doesn't, someone else's code was
-              scanned.
-            </dd>
-          </dl>
-        </div>
+            </div>
+            <p className="secondary small">
+              Works once, for {Math.round(info.validForSecs / 60)} minutes ·{" "}
+              {info.addresses.length ? info.addresses.join(", ") : "not on a network"}
+            </p>
+          </div>
+        </section>
       )}
     </div>
   );

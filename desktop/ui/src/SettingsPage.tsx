@@ -16,7 +16,7 @@ export function SettingsPage({ snapshot }: { snapshot: Snapshot }) {
       await api.updateSettings(draft);
       setMessage({
         kind: "ok",
-        text: nameChanged ? "Saved. The new name is shown to others after Beam restarts." : "Saved.",
+        text: nameChanged ? "Saved. Others see the new name after Beam restarts." : "Saved",
       });
     } catch (e) {
       setMessage({ kind: "error", text: String(e) });
@@ -30,10 +30,7 @@ export function SettingsPage({ snapshot }: { snapshot: Snapshot }) {
   };
 
   return (
-    <div className="page">
-      <header className="page-header">
-        <h1>Settings</h1>
-      </header>
+    <div className="page narrow">
       <form
         className="settings"
         onSubmit={(e) => {
@@ -41,76 +38,134 @@ export function SettingsPage({ snapshot }: { snapshot: Snapshot }) {
           save();
         }}
       >
-        <label className="field">
-          <span>Device name</span>
-          <input value={draft.deviceName} onChange={(e) => set("deviceName", e.target.value)} maxLength={63} />
-          <small className="muted">What other devices see.</small>
-        </label>
-
-        <label className="field">
-          <span>Save received files to</span>
-          <div className="input-row">
-            <input value={draft.downloadDir} onChange={(e) => set("downloadDir", e.target.value)} />
-            <button type="button" className="ghost" onClick={browse}>
-              Browse…
-            </button>
+        <section aria-labelledby="this-pc">
+          <h2 id="this-pc" className="section-title">
+            This computer
+          </h2>
+          <div className="list form-list">
+            <label className="field">
+              <span className="strong">Name</span>
+              <span className="secondary">What other devices see</span>
+              <input value={draft.deviceName} onChange={(e) => set("deviceName", e.target.value)} maxLength={63} />
+            </label>
+            <label className="field">
+              <span className="strong">Save received files to</span>
+              <div className="input-row">
+                <input value={draft.downloadDir} onChange={(e) => set("downloadDir", e.target.value)} />
+                <button type="button" className="button" onClick={browse}>
+                  Browse
+                </button>
+              </div>
+            </label>
+            <label className="field">
+              <span className="strong">Who can see this computer when Beam starts</span>
+              <select
+                value={draft.visibility}
+                onChange={(e) => set("visibility", e.target.value as Settings["visibility"])}
+              >
+                <option value="everyone">Everyone, for 10 minutes</option>
+                <option value="trusted">Trusted devices</option>
+                <option value="off">Nobody (hidden)</option>
+              </select>
+            </label>
+            <label className="field">
+              <span className="strong">Parallel connections when sending</span>
+              <span className="secondary">More can be faster on fast networks</span>
+              <select value={draft.streams} onChange={(e) => set("streams", Number(e.target.value))}>
+                {[1, 2, 4, 8].map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                    {n === 4 ? " (recommended)" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="switch-row">
+              <span className="grow">
+                <span className="strong">Show Beam in Explorer's Send to menu</span>
+              </span>
+              <input
+                type="checkbox"
+                role="switch"
+                checked={draft.sendToShortcut}
+                onChange={(e) => set("sendToShortcut", e.target.checked)}
+              />
+            </label>
+            <label className="switch-row">
+              <span className="grow">
+                <span className="strong">Start with Windows</span>
+                <span className="secondary">Beam waits in the tray, ready to receive</span>
+              </span>
+              <input
+                type="checkbox"
+                role="switch"
+                checked={draft.startWithWindows}
+                onChange={(e) => set("startWithWindows", e.target.checked)}
+              />
+            </label>
           </div>
-        </label>
-
-        <label className="field">
-          <span>Parallel connections when sending</span>
-          <select value={draft.streams} onChange={(e) => set("streams", Number(e.target.value))}>
-            {[1, 2, 4, 8].map((n) => (
-              <option key={n} value={n}>
-                {n}
-                {n === 4 ? " (recommended)" : ""}
-              </option>
-            ))}
-          </select>
-          <small className="muted">More connections can be faster on fast networks.</small>
-        </label>
-
-        <label className="field">
-          <span>Visibility when Beam starts</span>
-          <select value={draft.visibility} onChange={(e) => set("visibility", e.target.value as Settings["visibility"])}>
-            <option value="everyone">Everyone (for 10 minutes)</option>
-            <option value="trusted">Trusted devices only</option>
-            <option value="off">Off</option>
-          </select>
-        </label>
-
-        <label className="toggle field-toggle">
-          <input type="checkbox" checked={draft.sendToShortcut} onChange={(e) => set("sendToShortcut", e.target.checked)} />
-          <span>
-            Add Beam to Explorer's <em>Send to</em> menu
-          </span>
-        </label>
-
-        <label className="toggle field-toggle">
-          <input
-            type="checkbox"
-            checked={draft.startWithWindows}
-            onChange={(e) => set("startWithWindows", e.target.checked)}
-          />
-          <span>Start Beam when I sign in to Windows (in the tray)</span>
-        </label>
-
-        <p className="muted small">
-          Auto-accept is set per device, on the <strong>Trusted devices</strong> page.
-        </p>
-
-        <div className="form-actions">
-          <button type="submit" className="primary" disabled={!changed}>
-            Save
-          </button>
-          {changed && (
-            <button type="button" className="ghost" onClick={() => setDraft(snapshot.settings)}>
-              Undo changes
+          <div className="form-actions">
+            <button type="submit" className="button primary" disabled={!changed}>
+              Save changes
             </button>
-          )}
-          {message && <span className={message.kind === "ok" ? "ok-text" : "error-text"}>{message.text}</span>}
-        </div>
+            {changed && (
+              <button type="button" className="text-button" onClick={() => setDraft(snapshot.settings)}>
+                Undo
+              </button>
+            )}
+            {message && (
+              <span role="status" className={message.kind === "ok" ? "ok-text" : "error-text"}>
+                {message.text}
+              </span>
+            )}
+          </div>
+        </section>
       </form>
+
+      <section aria-labelledby="trusted">
+        <h2 id="trusted" className="section-title">
+          Trusted devices
+        </h2>
+        <p className="secondary section-intro">
+          Trusted devices can always find you. With auto-accept on, their files arrive without asking. Pair a phone, or
+          tick "Always accept" on an incoming request, to trust it.
+        </p>
+        {snapshot.trusted.length === 0 ? (
+          <p className="secondary empty-line">No trusted devices yet.</p>
+        ) : (
+          <ul className="list">
+            {snapshot.trusted.map((device) => (
+              <li key={device.deviceId} className="row">
+                <div className="grow">
+                  <p className="strong">{device.name}</p>
+                  <p className="secondary mono">{device.deviceId}</p>
+                </div>
+                <label className="inline-switch">
+                  <span className="secondary">Auto-accept</span>
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    checked={device.autoAccept}
+                    onChange={(e) => api.setAutoAccept(device.deviceId, e.target.checked)}
+                  />
+                </label>
+                <button
+                  className="text-button danger"
+                  onClick={() => {
+                    if (confirm(`Stop trusting ${device.name}?`)) api.removeTrusted(device.deviceId);
+                  }}
+                >
+                  Remove
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <p className="footnote">
+        {snapshot.me.name} · <span className="mono">{snapshot.me.deviceId}</span>
+      </p>
     </div>
   );
 }

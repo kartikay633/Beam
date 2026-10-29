@@ -8,19 +8,24 @@ import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Devices
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.SwapVert
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Icon
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -29,51 +34,50 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.beam.android.radio.RadioPermissions
 
-enum class Tab(val label: String, val icon: ImageVector) {
-    HOME("Home", Icons.Filled.Home),
-    TRANSFERS("Transfers", Icons.Filled.SwapVert),
-    DEVICES("Devices", Icons.Filled.Devices),
-    SETTINGS("Settings", Icons.Filled.Settings),
+/** Home, and the screens reached from it (each with a back bar). */
+enum class Screen(val title: String) {
+    HOME("Beam"),
+    TRANSFERS("Transfers"),
+    SETTINGS("Settings"),
+    PAIR("Pair with a laptop"),
 }
 
 @Composable
 fun BeamScreen(vm: BeamViewModel, onRetry: () -> Unit) {
     val state by vm.state.collectAsStateWithLifecycle()
     val staged by vm.staged.collectAsStateWithLifecycle()
-    var tab by rememberSaveable { mutableStateOf(Tab.HOME) }
-    var pairing by rememberSaveable { mutableStateOf(false) }
+    var screen by rememberSaveable { mutableStateOf(Screen.HOME) }
     val snackbar = remember { SnackbarHostState() }
 
     // Sharing to Beam lands on Home, where the devices are.
-    LaunchedEffect(staged.isNotEmpty()) { if (staged.isNotEmpty()) tab = Tab.HOME }
+    LaunchedEffect(staged.isNotEmpty()) { if (staged.isNotEmpty()) screen = Screen.HOME }
     LaunchedEffect(state.message) {
         state.message?.let {
             vm.messageShown()
             snackbar.showSnackbar(it)
         }
     }
-    BackHandler(enabled = pairing || tab != Tab.HOME) {
-        if (pairing) pairing = false else tab = Tab.HOME
-    }
+    BackHandler(enabled = screen != Screen.HOME) { screen = Screen.HOME }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
-        bottomBar = {
-            if (!pairing) {
-                NavigationBar {
-                    Tab.entries.forEach {
-                        NavigationBarItem(
-                            selected = tab == it,
-                            onClick = { tab = it },
-                            icon = { Icon(it.icon, null) },
-                            label = { Text(it.label) },
-                        )
+        topBar = {
+            if (screen != Screen.HOME) {
+                Row(
+                    Modifier.fillMaxWidth().statusBarsPadding().heightIn(min = 56.dp).padding(start = 4.dp, end = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = { screen = Screen.HOME }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
+                    }
+                    Text(screen.title, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    if (screen == Screen.TRANSFERS && state.transfers.any { it.finished }) {
+                        TextButton(onClick = vm::clearFinished) { Text("Clear finished") }
                     }
                 }
             }
@@ -81,9 +85,9 @@ fun BeamScreen(vm: BeamViewModel, onRetry: () -> Unit) {
     ) { padding ->
         val modifier = Modifier.padding(padding)
         androidx.compose.foundation.layout.Box(modifier) {
-            when {
-                pairing -> PairScreen(vm) { pairing = false }
-                tab == Tab.HOME -> HomeScreen(
+            when (screen) {
+                Screen.PAIR -> PairScreen(vm) { screen = Screen.HOME }
+                Screen.HOME -> HomeScreen(
                     state = state,
                     staged = staged,
                     vm = vm,
@@ -92,18 +96,18 @@ fun BeamScreen(vm: BeamViewModel, onRetry: () -> Unit) {
                         RadioBanner(vm::refreshRadio)
                     },
                     onRetry = onRetry,
-                    onPair = { pairing = true },
-                    onShowTransfers = { tab = Tab.TRANSFERS },
+                    onPair = { screen = Screen.PAIR },
+                    onSettings = { screen = Screen.SETTINGS },
+                    onShowTransfers = { screen = Screen.TRANSFERS },
                 )
-                tab == Tab.TRANSFERS -> TransfersScreen(state, vm)
-                tab == Tab.DEVICES -> TrustedScreen(state, vm) { pairing = true }
-                else -> SettingsScreen(state, vm)
+                Screen.TRANSFERS -> TransfersScreen(state, vm)
+                Screen.SETTINGS -> SettingsScreen(state, vm) { screen = Screen.PAIR }
             }
         }
     }
 
     state.offers.firstOrNull()?.let { offer ->
-        OfferDialog(offer) { accept, trust -> vm.respond(offer.offerId, accept, trust) }
+        OfferSheet(offer) { accept, trust -> vm.respond(offer.offerId, accept, trust) }
     }
 }
 

@@ -1,35 +1,26 @@
 import { api, type Transfer } from "./api";
 import { formatAgo, formatBytes, formatCode, formatDuration, formatSpeed } from "./format";
-import { ArrowDownIcon, ArrowUpIcon, CloseIcon, FolderIcon } from "./icons";
-
-const STATE_LABEL: Record<Transfer["state"], string> = {
-  waiting: "Waiting",
-  active: "In progress",
-  reconnecting: "Reconnecting",
-  done: "Done",
-  declined: "Declined",
-  failed: "Failed",
-  cancelled: "Cancelled",
-};
+import { AlertIcon, ArrowDownIcon, ArrowUpIcon, CheckIcon, CloseIcon } from "./icons";
 
 const FINISHED = new Set(["done", "declined", "failed", "cancelled"]);
 
 export function Transfers({ transfers }: { transfers: Transfer[] }) {
   const anyFinished = transfers.some((t) => FINISHED.has(t.state));
   return (
-    <section>
+    <section aria-labelledby="transfers">
       <div className="section-header">
-        <h2>Transfers</h2>
+        <h2 id="transfers">Transfers</h2>
+        <span className="grow" />
         {anyFinished && (
-          <button className="ghost small" onClick={() => api.clearFinished()}>
+          <button className="text-button subtle" onClick={() => api.clearFinished()}>
             Clear finished
           </button>
         )}
       </div>
       {transfers.length === 0 ? (
-        <div className="empty muted">Nothing sent or received yet.</div>
+        <p className="secondary empty-line">Files you send and receive show up here.</p>
       ) : (
-        <ul className="transfer-list">
+        <ul className="list">
           {transfers.map((t) => (
             <TransferRow key={t.id} transfer={t} />
           ))}
@@ -46,58 +37,83 @@ function TransferRow({ transfer: t }: { transfer: Transfer }) {
     t.fileCount === 1
       ? t.fileNames[0]
       : `${t.fileNames.slice(0, 2).join(", ")}${t.fileCount > 2 ? ` and ${t.fileCount - 2} more` : ""}`;
+  const peer = `${t.direction === "send" ? "To" : "From"} ${t.peerName}`;
 
   let status: string;
   if (t.state === "active") {
-    status = `${formatBytes(t.doneBytes)} of ${formatBytes(t.totalBytes)}`;
+    status = peer;
     if (t.speedBps > 0) status += ` · ${formatSpeed(t.speedBps)}`;
     if (t.etaSecs != null) status += ` · ${formatDuration(t.etaSecs)} left`;
   } else if (t.state === "done") {
-    status = `${formatBytes(t.totalBytes)} · ${formatAgo(t.startedMs)}`;
+    status = `${t.direction === "send" ? "Sent to" : "From"} ${t.peerName} · ${formatBytes(t.totalBytes)} · ${formatAgo(t.startedMs)}`;
+  } else if (t.state === "waiting" && t.verificationCode) {
+    status = `${peer} · waiting for them to accept · code ${formatCode(t.verificationCode)}`;
+  } else if (t.state === "reconnecting") {
+    status = t.detail ?? `${peer} · reconnecting…`;
+  } else if (t.state === "waiting") {
+    status = t.detail ?? `${peer} · connecting…`;
+  } else if (t.state === "declined") {
+    const reason = t.detail && t.detail.toLowerCase() !== "declined" ? `: ${t.detail}` : "";
+    status = `${peer} · declined${reason}`;
+  } else if (t.state === "cancelled") {
+    status = `${peer} · cancelled`;
   } else {
-    status = t.detail ?? STATE_LABEL[t.state];
+    status = t.detail ?? "Failed";
   }
 
-  return (
-    <li className={`transfer ${t.state}`}>
-      <div className={`direction ${t.direction}`} title={t.direction === "send" ? "Sent" : "Received"}>
-        {t.direction === "send" ? <ArrowUpIcon size={18} /> : <ArrowDownIcon size={18} />}
+  const badge =
+    t.state === "done" ? (
+      <div className="badge ok">
+        <CheckIcon size={16} />
       </div>
-      <div className="transfer-main">
-        <div className="transfer-title">
-          <span className="transfer-files" title={t.fileNames.join("\n")}>
+    ) : t.state === "failed" ? (
+      <div className="badge bad">
+        <AlertIcon size={16} />
+      </div>
+    ) : (
+      <div className="badge" title={t.direction === "send" ? "Sending" : "Receiving"}>
+        {t.direction === "send" ? <ArrowUpIcon size={16} /> : <ArrowDownIcon size={16} />}
+      </div>
+    );
+
+  return (
+    <li className={`row transfer ${t.state}`}>
+      {badge}
+      <div className="grow">
+        <div className="title-line">
+          <p className="strong ellipsis" title={t.fileNames.join("\n")}>
             {files}
-          </span>
-          <span className={`state-pill ${t.state}`}>{STATE_LABEL[t.state]}</span>
-        </div>
-        <div className="muted small">
-          {t.direction === "send" ? "to" : "from"} {t.peerName}
-          {t.verificationCode && t.state === "waiting" && (
-            <>
-              {" "}
-              · code <span className="mono">{formatCode(t.verificationCode)}</span>
-            </>
+          </p>
+          {t.state === "active" && (
+            <span className="secondary numeric">
+              {formatBytes(t.doneBytes)} of {formatBytes(t.totalBytes)}
+            </span>
           )}
         </div>
         {!finished && (
-          <div className="progress" role="progressbar" aria-valuenow={Math.round(fraction * 100)} aria-valuemin={0} aria-valuemax={100}>
+          <div
+            className={`progress ${t.state === "active" ? "" : "pending"}`}
+            role="progressbar"
+            aria-label={t.direction === "send" ? "Sent" : "Received"}
+            aria-valuenow={Math.round(fraction * 100)}
+            aria-valuemin={0}
+            aria-valuemax={100}
+          >
             <div className="progress-fill" style={{ width: `${(fraction * 100).toFixed(1)}%` }} />
           </div>
         )}
-        <div className={`small ${t.state === "failed" ? "error-text" : "muted"}`}>{status}</div>
+        <p className={`numeric ${t.state === "failed" ? "error-text" : "secondary"}`}>{status}</p>
       </div>
-      <div className="row-actions">
-        {t.direction === "receive" && t.state === "done" && (
-          <button className="icon-button" title="Show in folder" onClick={() => api.openFolder(t.folder ?? undefined)}>
-            <FolderIcon size={18} />
-          </button>
-        )}
-        {!finished && (
-          <button className="icon-button" title="Cancel" onClick={() => api.cancel(t.id)}>
-            <CloseIcon size={18} />
-          </button>
-        )}
-      </div>
+      {t.direction === "receive" && t.state === "done" && (
+        <button className="text-button" onClick={() => api.openFolder(t.folder ?? undefined)}>
+          Show in folder
+        </button>
+      )}
+      {!finished && (
+        <button className="icon-button" aria-label="Cancel" title="Cancel" onClick={() => api.cancel(t.id)}>
+          <CloseIcon size={16} />
+        </button>
+      )}
     </li>
   );
 }

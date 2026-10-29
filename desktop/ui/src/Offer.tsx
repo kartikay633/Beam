@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api, type Offer } from "./api";
 import { useCountdown } from "./App";
 import { formatBytes, formatCode } from "./format";
-import { FileIcon } from "./icons";
+import { ShieldIcon } from "./icons";
 
 /** The always-on-top popup for an incoming offer. */
 export function OfferWindow({ id }: { id: string }) {
@@ -30,55 +30,57 @@ export function OfferWindow({ id }: { id: string }) {
     }
   };
 
+  const count = offer.files.length;
   const total = 60;
   const left = remaining ?? total;
   return (
     <div className="offer">
-      <div className="offer-header">
-        <div className="offer-title">Incoming files</div>
-        <div className="offer-from">
-          <strong>{offer.fromName}</strong> wants to send {offer.files.length} file
-          {offer.files.length === 1 ? "" : "s"} ({formatBytes(offer.totalBytes)})
+      <div className="offer-body">
+        <div>
+          <h1>
+            {offer.fromName} wants to send {count === 1 ? "a file" : `${count} files`}
+          </h1>
+          <p className="secondary">{formatBytes(offer.totalBytes)} in total</p>
         </div>
-        <div className="muted small mono">{offer.fromId}</div>
+
+        <ul className="offer-files">
+          {offer.files.map((file, i) => (
+            <li key={i}>
+              <span className="ellipsis" title={file.name}>
+                {file.name}
+              </span>
+              <span className="secondary numeric">{formatBytes(file.size)}</span>
+            </li>
+          ))}
+        </ul>
+
+        <div className="code-box">
+          <div className="grow">
+            <p className="secondary">{offer.trusted ? "Trusted device · code" : "Check this code matches the sender"}</p>
+            <p className="code">{formatCode(offer.verificationCode)}</p>
+          </div>
+          <ShieldIcon size={22} />
+        </div>
+
+        {!offer.trusted && (
+          <label className="check">
+            <input type="checkbox" checked={trust} onChange={(e) => setTrust(e.target.checked)} />
+            <span>Always accept from {offer.fromName}</span>
+          </label>
+        )}
+
+        {error && <div className="notice error">{error}</div>}
       </div>
-
-      <div className={`code-box ${offer.trusted ? "trusted" : ""}`}>
-        <div className="small muted">{offer.trusted ? "Trusted device" : "Verification code"}</div>
-        <div className="code mono">{formatCode(offer.verificationCode)}</div>
-        {!offer.trusted && <div className="small muted">Check that the sender sees the same code.</div>}
-      </div>
-
-      <ul className="offer-files">
-        {offer.files.map((file, i) => (
-          <li key={i}>
-            <FileIcon size={16} />
-            <span className="grow ellipsis" title={file.name}>
-              {file.name}
-            </span>
-            <span className="muted small">{formatBytes(file.size)}</span>
-          </li>
-        ))}
-      </ul>
-
-      {!offer.trusted && (
-        <label className="toggle">
-          <input type="checkbox" checked={trust} onChange={(e) => setTrust(e.target.checked)} />
-          <span>Trust this device and accept its files automatically</span>
-        </label>
-      )}
-
-      {error && <div className="banner error">{error}</div>}
 
       <div className="offer-actions">
-        <button className="ghost" disabled={busy} onClick={() => answer(false)}>
+        <button className="button large" disabled={busy} onClick={() => answer(false)}>
           Decline
         </button>
-        <button className="primary" disabled={busy} onClick={() => answer(true)} autoFocus>
+        <button className="button primary large" disabled={busy} onClick={() => answer(true)} autoFocus>
           Accept
         </button>
       </div>
-      <div className="timeout" aria-label={`${Math.ceil(left)} seconds left`}>
+      <div className="timeout" aria-label={`${Math.ceil(left)} seconds left to answer`}>
         <div className="timeout-fill" style={{ width: `${(left / total) * 100}%` }} />
       </div>
     </div>

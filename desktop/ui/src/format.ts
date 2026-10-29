@@ -36,3 +36,8 @@ export function formatAgo(ms: number): string {
 export function formatCode(code: string): string {
   return code.length === 6 ? `${code.slice(0, 3)} ${code.slice(3)}` : code;
 }
+
+/** Whole minutes left, rounded up: "9 min". For countdowns that tick slowly. */
+export function formatMinutesLeft(seconds: number): string {
+  return `${Math.max(1, Math.ceil(seconds / 60))} min`;
+}
