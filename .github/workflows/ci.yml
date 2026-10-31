@@ -139,3 +139,41 @@ jobs:
           name: beam-android-debug-apk
           path: android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+  # Every green build of main replaces the files on the "latest"
+  # pre-release, so testers get a plain .apk and .msi (artifacts are
+  # always zipped) from links that never change:
+  # https://github.com/<repo>/releases/download/latest/Beam.apk
+  publish:
+    name: Publish the latest build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [rust, desktop, android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: beam-*
+          path: artifacts
+
+      - name: Name the files
+        run: |
+          cp artifacts/beam-android-debug-apk/*.apk Beam.apk
+          cp artifacts/beam-windows-msi/*.msi Beam.msi
+
+      - name: Update the "latest" release
+        run: |
+          if gh release view latest > /dev/null 2>&1; then
+            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/latest" -f sha="$GITHUB_SHA" -F force=true > /dev/null
+          else
+            gh release create latest --prerelease --target "$GITHUB_SHA" --title "Latest build" --notes "Building…"
+          fi
+          gh release upload latest Beam.apk Beam.msi --clobber
+          gh release edit latest --notes "The newest build of main ($GITHUB_SHA), replaced on every push.
+
+          - **Beam.apk**: Android 10 or later. Open it on the phone to install.
+          - **Beam.msi**: Windows installer. Not signed yet, so Windows may warn before installing; the Microsoft Store version won't."

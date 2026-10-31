@@ -9,6 +9,15 @@ sharing that works even with no shared Wi-Fi network and no internet.
 > private hotspot to transfer) are built and being tested on real devices.
 > Follow progress in [docs/SPEC.md](docs/SPEC.md).
 
+## Download the latest build
+
+- **Android:** [Beam.apk](https://github.com/kartikay633/Beam/releases/download/latest/Beam.apk)
+  (Android 10 or later; open it on the phone to install)
+- **Windows:** [Beam.msi](https://github.com/kartikay633/Beam/releases/download/latest/Beam.msi)
+  (not signed yet, so Windows may warn; the Microsoft Store version won't)
+
+Both are rebuilt from `main` on every push that passes CI.
+
 ## What makes it different
 
 - **No shared network needed.** On a train or anywhere without Wi-Fi in
