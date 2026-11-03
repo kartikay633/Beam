@@ -7,65 +7,59 @@ export function PairPage() {
   const [info, setInfo] = useState<PairingInfo | null>(null);
   const [paired, setPaired] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  // Each code works once, for 5 minutes: show a fresh one on open and
-  // after every successful pairing.
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+
   useEffect(() => {
-    api.pairing().then(setInfo);
-    if (!isTauri) return;
+    let disposed = false;
     let stop: (() => void) | undefined;
-    listen<string>("paired", (event) => {
-      setPaired(event.payload);
-      api.pairing().then(setInfo);
-    }).then((unlisten) => (stop = unlisten));
-    return () => stop?.();
-  }, []);
+    setInfo(null);
+    setError(null);
+    const refresh = () => api.pairing()
+      .then((value) => { if (!disposed) setInfo(value); })
+      .catch((e) => { if (!disposed) setError(String(e)); });
+    void refresh();
+    if (isTauri) {
+      listen<string>("paired", (event) => {
+        if (!disposed) { setPaired(event.payload); void refresh(); }
+      }).then((unlisten) => { if (disposed) unlisten(); else stop = unlisten; })
+        .catch((e) => { if (!disposed) setError(String(e)); });
+    }
+    return () => { disposed = true; stop?.(); };
+  }, [attempt]);
+
   return (
-    <div className="page narrow">
-      {paired && (
-        <div className="notice ok" role="status">
-          <CheckIcon size={16} />
-          <span>Paired with {paired}. It can now send to you without asking.</span>
-        </div>
-      )}
+    <section className="pair-section" aria-label="Pair a phone">
+      {paired && <p className="notice ok" role="status"><CheckIcon size={16} /> Paired with {paired}.</p>}
+      {error && <div className="notice error" role="alert">
+        <span>{error}</span>
+        <button className="button" onClick={() => setAttempt((n) => n + 1)}>Try again</button>
+      </div>}
+      {!info && !error && <p role="status">Preparing a pairing code…</p>}
       {info && (
-        <section className="pair-card">
-          {/* The SVG comes from our own backend (the qrcode crate). */}
+        <div className="pair-card">
           <div className="qr" dangerouslySetInnerHTML={{ __html: info.svg }} />
           <div className="grow pair-steps">
             <h1>Pair a phone</h1>
             <ol>
               <li>Open Beam on your phone.</li>
-              <li>Tap the pair icon at the top, then scan this code.</li>
-              <li>
-                Check the phone shows <span className="mono">{info.deviceId}</span>.
-              </li>
+              <li>Open Settings → Pair with a laptop, then scan this code.</li>
+              <li>Check the phone shows <span className="mono">{info.deviceId}</span>.</li>
             </ol>
-            <p className="secondary">
-              Paired devices trust each other: they always find each other, even when set to trusted devices only.
-            </p>
+            <p className="secondary">Paired devices recognize each other while nearby and Beam is running. Keep Wi-Fi and Bluetooth on for sharing without a router.</p>
             <div className="pair-actions">
-              <button className="text-button" onClick={() => api.pairing().then(setInfo)}>
-                New code
-              </button>
-              <button
-                className="text-button"
-                onClick={() =>
-                  navigator.clipboard.writeText(info.uri).then(() => {
-                    setCopied(true);
-                    setTimeout(() => setCopied(false), 2000);
-                  })
-                }
-              >
-                {copied ? "Copied" : "Copy pairing link"}
-              </button>
+              <button className="text-button" onClick={() => setAttempt((n) => n + 1)}>New code</button>
+              <button className="text-button" onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(info.uri);
+                  setCopied(true);
+                } catch (e) { setError(String(e)); }
+              }}>{copied ? "Copied" : "Copy pairing link"}</button>
             </div>
-            <p className="secondary small">
-              Works once, for {Math.round(info.validForSecs / 60)} minutes ·{" "}
-              {info.addresses.length ? info.addresses.join(", ") : "not on a network"}
-            </p>
+            <p className="caption">Works once, for {Math.round(info.validForSecs / 60)} minutes · {info.addresses.length ? info.addresses.join(", ") : "Connect a private Wi-Fi link to pair"}</p>
           </div>
-        </section>
+        </div>
       )}
-    </div>
+    </section>
   );
 }

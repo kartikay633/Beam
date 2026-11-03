@@ -1,6 +1,6 @@
 # Beam privacy policy
 
-Last updated: 29 October 2026
+Last updated: 3 November 2026
 
 Beam sends files directly between your own devices. It has no servers and
 no accounts, and it collects nothing.
@@ -33,6 +33,15 @@ no accounts, and it collects nothing.
 - **Location (Windows 11; Android 12 and older)**: Windows and older
   versions of Android only let apps scan for Wi-Fi networks and Bluetooth
   devices with location permission. Beam never reads your location.
+- **Turning on Bluetooth, Wi-Fi and Location (Android)**: when you open
+  Beam, it asks Android to switch these on if they're off, because some
+  phones only find Wi-Fi devices with Location on. Beam still never reads
+  your location. When you leave Beam, it reminds you to switch off the ones
+  it turned on.
+- **Waking up after Quit (Windows, Microsoft Store version)**: after you
+  quit Beam, Windows watches for a nearby phone running Beam over
+  Bluetooth and starts Beam again in the tray. This happens on your PC;
+  nothing is sent anywhere.
 - **Camera (Android)**: only to scan a pairing QR code. Nothing is recorded.
 - **Notifications (Android)**: to tell you about incoming files and progress.
 

@@ -1,0 +1,19 @@
+[package]
+name = "beam-wake-task"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Starts Beam when a phone's Beam Bluetooth advert appears while Beam isn't running (Store package only)."
+
+[lib]
+crate-type = ["cdylib"]
+
+[target."cfg(windows)".dependencies]
+windows-core = "0.62.2"
+windows = { version = "0.62.2", features = [
+    "ApplicationModel",
+    "ApplicationModel_Background",
+    "Foundation",
+    "Win32_Foundation",
+    "Win32_System_WinRT",
+] }

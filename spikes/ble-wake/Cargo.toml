@@ -1,0 +1,24 @@
+[package]
+name = "beam-wake-spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Stage 3 spike: can Windows start Beam when a phone's Bluetooth advert appears?"
+
+# Not part of the Beam workspace: a throwaway experiment.
+[workspace]
+
+[dependencies]
+windows-core = "0.62.2"
+windows = { version = "0.62.2", features = [
+    "ApplicationModel_Background",
+    "Devices_Bluetooth",
+    "Devices_Bluetooth_Advertisement",
+    "Devices_Bluetooth_Background",
+    "Foundation",
+    "Foundation_Collections",
+    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+] }

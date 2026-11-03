@@ -20,7 +20,9 @@ param(
     # Defaults to tauri.conf.json's version plus ".0" (MSIX needs four parts).
     [string]$Version = "",
     # Where cargo puts release builds.
-    [string]$TargetDir = ""
+    [string]$TargetDir = "",
+    # Also install the unpacked layout on this PC (needs Developer Mode).
+    [switch]$Register
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,6 +39,8 @@ if (-not $TargetDir) {
 }
 $exe = Join-Path $TargetDir "release/beam-desktop.exe"
 if (-not (Test-Path $exe)) { throw "No release build at $exe. Run 'npm run tauri build' first." }
+$wakeTask = Join-Path $TargetDir "release/beam_wake_task.dll"
+if (-not (Test-Path $wakeTask)) { throw "No wake-up task at $wakeTask. Run 'cargo build --release -p beam-wake-task' first." }
 
 $sdk = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/makeappx.exe" |
     Sort-Object { [version]$_.Directory.Parent.Name } | Select-Object -Last 1
@@ -48,6 +52,7 @@ Remove-Item -Recurse -Force $layout -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force (Join-Path $layout "Assets") | Out-Null
 
 Copy-Item $exe (Join-Path $layout "Beam.exe")
+Copy-Item $wakeTask (Join-Path $layout "beam_wake_task.dll")
 $icons = Join-Path $desktop "src-tauri/icons"
 foreach ($name in "StoreLogo.png", "Square44x44Logo.png", "Square150x150Logo.png") {
     Copy-Item (Join-Path $icons $name) (Join-Path $layout "Assets/$name")
@@ -59,6 +64,13 @@ $manifest = (Get-Content (Join-Path $here "AppxManifest.xml") -Raw).
     Replace("{{PUBLISHER_DISPLAY_NAME}}", $PublisherDisplayName).
     Replace("{{VERSION}}", $Version)
 Set-Content -Path (Join-Path $layout "AppxManifest.xml") -Value $manifest -Encoding utf8
+
+# -Register installs the layout folder directly (Developer Mode, no signing),
+# for testing on this PC.
+if ($Register) {
+    Add-AppxPackage -Register (Join-Path $layout "AppxManifest.xml") -ForceApplicationShutdown
+    Write-Output "Registered $layout"
+}
 
 $package = Join-Path $out "Beam_${Version}_x64.msix"
 & $sdk.FullName pack /o /d $layout /p $package

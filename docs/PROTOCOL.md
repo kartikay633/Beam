@@ -277,7 +277,7 @@ report a version mismatch.
 | `device_id` | bytes(8) | First 8 bytes of SHA-256 of the sender's static key. Must match the key proven in the handshake. |
 | `name` | text | Human-readable device name. |
 | `type` | text | `"phone"` or `"laptop"`. |
-| `capabilities` | array of text | Optional features. Empty in version 1.0. |
+| `capabilities` | array of text | Optional features. Empty in version 1.0. Since 1.1 a receiver lists `save-to:<id>` for each folder a **trusted** sender may pick (for example `save-to:desktop`), each followed by up to 20 of its visible subfolders as `save-to:<id>/<name>`; untrusted senders get none. |
 
 ```
 {"version": {"major": 1, "minor": 0},
@@ -292,6 +292,7 @@ report a version mismatch.
 | `transfer_id` | uuid | Random v4 UUID chosen by the sender; reused when resuming. |
 | `files` | array of file entries | See below. |
 | `total_size` | uint | Sum of all `size` fields. |
+| `destination` | text, optional | Since 1.1: a folder id from the receiver's `save-to:` capabilities. Omitted for the default folder. Ignored (default folder used) when the sender isn't trusted or the id isn't one the receiver offers. May name one subfolder, `<id>/<name>`: listed or new (the receiver creates it). The name must be a single plain folder name (no separators, no `..`, no leading dot, nothing the file-name sanitizer would change), else the default folder is used. Never a path. |
 
 File entry:
 

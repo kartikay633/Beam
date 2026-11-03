@@ -1,37 +1,58 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { api, isTauri, type Settings, type Snapshot } from "./api";
+import { api, isTauri, SAVE_FOLDERS, type Settings, type Snapshot } from "./api";
+import { TrustedDevices } from "./Devices";
 
 export function SettingsPage({ snapshot }: { snapshot: Snapshot }) {
   const [draft, setDraft] = useState<Settings>(snapshot.settings);
   const [message, setMessage] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
-  useEffect(() => setDraft(snapshot.settings), [snapshot.settings]);
+  const [busy, setBusy] = useState(false);
+  const persisted = JSON.stringify(snapshot.settings);
+  useEffect(() => setDraft(JSON.parse(persisted) as Settings), [persisted]);
 
   const changed = JSON.stringify(draft) !== JSON.stringify(snapshot.settings);
-  const nameChanged = draft.deviceName !== snapshot.settings.deviceName;
+  const restartRequired = draft.deviceName !== snapshot.settings.deviceName || draft.downloadDir !== snapshot.settings.downloadDir;
   const set = <K extends keyof Settings>(key: K, value: Settings[K]) => setDraft({ ...draft, [key]: value });
 
   const save = async () => {
+    if (busy) return;
+    setBusy(true);
     try {
       await api.updateSettings(draft);
       setMessage({
         kind: "ok",
-        text: nameChanged ? "Saved. Others see the new name after Beam restarts." : "Saved",
+        text: restartRequired ? "Saved. Restart Beam to apply the name or download folder change." : "Saved",
       });
     } catch (e) {
       setMessage({ kind: "error", text: String(e) });
+    } finally {
+      setBusy(false);
     }
   };
 
   const browse = async () => {
     if (!isTauri) return;
-    const folder = await open({ directory: true, title: "Where should received files go?" });
-    if (typeof folder === "string") set("downloadDir", folder);
+    try {
+      const folder = await open({ directory: true, title: "Where should received files go?" });
+      if (typeof folder === "string") set("downloadDir", folder);
+    } catch (e) { setMessage({ kind: "error", text: String(e) }); }
+  };
+
+  const pin = async () => {
+    try {
+      const folder = isTauri
+        ? await open({ directory: true, title: "Which folder can your devices save to?" })
+        : String.raw`C:\Users\you\Projects`;
+      if (typeof folder === "string" && !draft.pinnedFolders.includes(folder)) {
+        set("pinnedFolders", [...draft.pinnedFolders, folder]);
+      }
+    } catch (e) { setMessage({ kind: "error", text: String(e) }); }
   };
 
   return (
     <div className="page narrow">
       <form
+        noValidate
         className="settings"
         onSubmit={(e) => {
           e.preventDefault();
@@ -45,21 +66,70 @@ export function SettingsPage({ snapshot }: { snapshot: Snapshot }) {
           <div className="list form-list">
             <label className="field">
               <span className="strong">Name</span>
-              <span className="secondary">What other devices see</span>
-              <input value={draft.deviceName} onChange={(e) => set("deviceName", e.target.value)} maxLength={63} />
+              <span className="secondary">What other devices see · applies after restart</span>
+              <input disabled={busy} value={draft.deviceName} onChange={(e) => set("deviceName", e.target.value)} maxLength={63} />
             </label>
             <label className="field">
               <span className="strong">Save received files to</span>
+              <span className="secondary">Folder changes apply after restart</span>
               <div className="input-row">
-                <input value={draft.downloadDir} onChange={(e) => set("downloadDir", e.target.value)} />
-                <button type="button" className="button" onClick={browse}>
+                <input disabled={busy} value={draft.downloadDir} onChange={(e) => set("downloadDir", e.target.value)} />
+                <button type="button" className="button" disabled={busy} onClick={browse}>
                   Browse
                 </button>
               </div>
             </label>
+            <fieldset className="field save-folders">
+              <legend className="strong">Your trusted devices can also save to</legend>
+              <span className="secondary">They pick the folder when sending. Other devices always use the folder above.</span>
+              <div className="checks">
+                {SAVE_FOLDERS.map((folder) => (
+                  <label key={folder.id} className="check">
+                    <input
+                      type="checkbox"
+                      disabled={busy}
+                      checked={draft.saveFolders.includes(folder.id)}
+                      onChange={(e) =>
+                        set(
+                          "saveFolders",
+                          e.target.checked
+                            ? SAVE_FOLDERS.map((f) => f.id).filter((id) => id === folder.id || draft.saveFolders.includes(id))
+                            : draft.saveFolders.filter((id) => id !== folder.id),
+                        )
+                      }
+                    />
+                    {folder.label}
+                  </label>
+                ))}
+              </div>
+              {draft.pinnedFolders.length > 0 && (
+                <ul className="pinned" aria-label="Pinned folders">
+                  {draft.pinnedFolders.map((folder) => (
+                    <li key={folder}>
+                      <span className="ellipsis" title={folder}>{folder}</span>
+                      <button
+                        type="button"
+                        className="text-button"
+                        disabled={busy}
+                        aria-label={`Remove ${folder}`}
+                        onClick={() => set("pinnedFolders", draft.pinnedFolders.filter((f) => f !== folder))}
+                      >
+                        Remove
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div>
+                <button type="button" className="button" disabled={busy} onClick={pin}>
+                  Add a folder…
+                </button>
+              </div>
+            </fieldset>
             <label className="field">
               <span className="strong">Who can see this computer when Beam starts</span>
               <select
+                disabled={busy}
                 value={draft.visibility}
                 onChange={(e) => set("visibility", e.target.value as Settings["visibility"])}
               >
@@ -71,7 +141,7 @@ export function SettingsPage({ snapshot }: { snapshot: Snapshot }) {
             <label className="field">
               <span className="strong">Parallel connections when sending</span>
               <span className="secondary">More can be faster on fast networks</span>
-              <select value={draft.streams} onChange={(e) => set("streams", Number(e.target.value))}>
+              <select disabled={busy} value={draft.streams} onChange={(e) => set("streams", Number(e.target.value))}>
                 {[1, 2, 4, 8].map((n) => (
                   <option key={n} value={n}>
                     {n}
@@ -88,6 +158,7 @@ export function SettingsPage({ snapshot }: { snapshot: Snapshot }) {
                 type="checkbox"
                 role="switch"
                 checked={draft.sendToShortcut}
+                disabled={busy}
                 onChange={(e) => set("sendToShortcut", e.target.checked)}
               />
             </label>
@@ -100,16 +171,17 @@ export function SettingsPage({ snapshot }: { snapshot: Snapshot }) {
                 type="checkbox"
                 role="switch"
                 checked={draft.startWithWindows}
+                disabled={busy}
                 onChange={(e) => set("startWithWindows", e.target.checked)}
               />
             </label>
           </div>
           <div className="form-actions">
-            <button type="submit" className="button primary" disabled={!changed}>
+            <button type="submit" className="button primary" disabled={!changed || busy} aria-busy={busy}>
               Save changes
             </button>
             {changed && (
-              <button type="button" className="text-button" onClick={() => setDraft(snapshot.settings)}>
+              <button type="button" className="text-button" disabled={busy} onClick={() => setDraft(snapshot.settings)}>
                 Undo
               </button>
             )}
@@ -123,44 +195,8 @@ export function SettingsPage({ snapshot }: { snapshot: Snapshot }) {
       </form>
 
       <section aria-labelledby="trusted">
-        <h2 id="trusted" className="section-title">
-          Trusted devices
-        </h2>
-        <p className="secondary section-intro">
-          Trusted devices can always find you. With auto-accept on, their files arrive without asking. Pair a phone, or
-          tick "Always accept" on an incoming request, to trust it.
-        </p>
-        {snapshot.trusted.length === 0 ? (
-          <p className="secondary empty-line">No trusted devices yet.</p>
-        ) : (
-          <ul className="list">
-            {snapshot.trusted.map((device) => (
-              <li key={device.deviceId} className="row">
-                <div className="grow">
-                  <p className="strong">{device.name}</p>
-                  <p className="secondary mono">{device.deviceId}</p>
-                </div>
-                <label className="inline-switch">
-                  <span className="secondary">Auto-accept</span>
-                  <input
-                    type="checkbox"
-                    role="switch"
-                    checked={device.autoAccept}
-                    onChange={(e) => api.setAutoAccept(device.deviceId, e.target.checked)}
-                  />
-                </label>
-                <button
-                  className="text-button danger"
-                  onClick={() => {
-                    if (confirm(`Stop trusting ${device.name}?`)) api.removeTrusted(device.deviceId);
-                  }}
-                >
-                  Remove
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
+        <h2 id="trusted" className="section-title">Trusted devices</h2>
+        <TrustedDevices devices={snapshot.trusted} />
       </section>
 
       <p className="footnote">

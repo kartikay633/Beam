@@ -2,7 +2,9 @@ package dev.beam.android.ui
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -16,10 +18,16 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -39,6 +47,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.beam.android.data.BeamState
 import dev.beam.android.data.StagedFile
+import dev.beam.android.data.saveKey
 import dev.beam.android.model.Format
 import dev.beam.android.service.Notifications
 import dev.beam.core.NearbyDevice
@@ -77,7 +86,14 @@ fun HomeScreen(
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.padding(start = 10.dp).weight(1f),
                     )
-                    IconButton(onClick = onPair) { Icon(Icons.Filled.QrCodeScanner, "Pair with a laptop") }
+                    if (state.trusted.isEmpty()) {
+                        TextButton(onClick = onPair) {
+                            Icon(Icons.Filled.QrCodeScanner, null, modifier = Modifier.padding(end = 6.dp))
+                            Text("Scan code")
+                        }
+                    } else {
+                        IconButton(onClick = onPair) { Icon(Icons.Filled.QrCodeScanner, "Pair with a computer") }
+                    }
                     IconButton(onClick = onSettings) { Icon(Icons.Filled.Tune, "Settings") }
                 }
             }
@@ -87,6 +103,9 @@ fun HomeScreen(
                 }
             }
             item { notificationBanner() }
+            if (state.trusted.isEmpty()) {
+                item { PairHint(onPair) }
+            }
             state.error?.let { error ->
                 item { Banner("Beam couldn't start: $error", action = "Retry", error = true, onAction = onRetry) }
             }
@@ -133,7 +152,12 @@ fun HomeScreen(
                                 }
                             }
                             DeviceRow(device, onClick = send) {
-                                if (staged.isEmpty()) Chevron() else RowButton("Send", send)
+                                RowButton(if (staged.isEmpty()) "Send files" else "Send", send)
+                            }
+                            val key = saveKey(device.name)
+                            val folders = state.saveFolders[key].orEmpty()
+                            if (device.trusted && folders.isNotEmpty()) {
+                                SaveToChoice(folders, state.saveTo[key]) { vm.setSaveTo(device, it) }
                             }
                         }
                     }
@@ -229,5 +253,157 @@ private fun visibilityLabel(state: BeamState): String {
         }
         Visibility.TRUSTED_ONLY -> "Visible to trusted devices"
         Visibility.OFF -> "Hidden"
+    }
+}
+
+/** "Save to  Desktop ▾": which folder on the PC the files land in. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SaveToChoice(folders: List<String>, chosen: String?, onChoose: (String?) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    var newIn by remember { mutableStateOf<String?>(null) }
+    Row(
+        Modifier.fillMaxWidth().padding(start = 70.dp, end = 16.dp, bottom = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("Save to", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        TextButton(onClick = { open = true }) {
+            Text(folderLabel(chosen), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Icon(Icons.Filled.ArrowDropDown, null)
+        }
+    }
+    if (open) {
+        val pick = { folder: String? ->
+            open = false
+            onChoose(folder)
+        }
+        ModalBottomSheet(onDismissRequest = { open = false }) {
+            LazyColumn(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+                item { SheetRow(folderLabel(null), chosen == null, indent = false) { pick(null) } }
+                saveFolderTree(folders).forEach { (root, subs) ->
+                    item { SheetRow(folderLabel(root), chosen == root, indent = false) { pick(root) } }
+                    items(subs) { sub -> SheetRow(sub.substringAfter('/'), chosen == sub, indent = true) { pick(sub) } }
+                    item {
+                        SheetRow("New folder…", selected = false, indent = true, accent = true) {
+                            open = false
+                            newIn = root
+                        }
+                    }
+                }
+            }
+        }
+    }
+    newIn?.let { root ->
+        NewFolderDialog(
+            inFolder = folderLabel(root),
+            onDismiss = { newIn = null },
+            onCreate = { name ->
+                newIn = null
+                onChoose("$root/$name")
+            },
+        )
+    }
+}
+
+@Composable
+private fun SheetRow(text: String, selected: Boolean, indent: Boolean, accent: Boolean = false, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).heightIn(min = 48.dp)
+            .padding(start = if (indent) 44.dp else 20.dp, end = 20.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text,
+            fontSize = 15.sp,
+            fontWeight = if (indent) FontWeight.Normal else FontWeight.Medium,
+            color = if (accent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        if (selected) Icon(Icons.Filled.Check, "Selected", tint = MaterialTheme.colorScheme.primary)
+    }
+}
+
+@Composable
+private fun NewFolderDialog(inFolder: String, onDismiss: () -> Unit, onCreate: (String) -> Unit) {
+    var name by remember { mutableStateOf("") }
+    val problem = folderNameProblem(name)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("New folder in $inFolder") },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                singleLine = true,
+                label = { Text("Folder name") },
+                isError = name.isNotEmpty() && problem != null,
+                supportingText = { if (name.isNotEmpty() && problem != null) Text(problem) },
+            )
+        },
+        confirmButton = { TextButton(onClick = { onCreate(name.trim()) }, enabled = problem == null) { Text("Use folder") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/** A PC's folders with their listed subfolders: ("documents", ["documents/Projects", …]). */
+internal fun saveFolderTree(folders: List<String>): List<Pair<String, List<String>>> {
+    val roots = folders.filter { '/' !in it }
+    return roots.map { root -> root to folders.filter { it.startsWith("$root/") } }
+}
+
+/** Characters Windows doesn't allow in a folder name. */
+private const val FORBIDDEN = "<>:\"/\\|?*"
+
+/** Why [raw] can't be a new folder on the PC, or null if it can. The PC checks again. */
+internal fun folderNameProblem(raw: String): String? {
+    val name = raw.trim()
+    return when {
+        name.isEmpty() -> "Type a name"
+        name.length > 100 -> "Use a shorter name"
+        name.startsWith('.') || name.endsWith('.') -> "Can't start or end with a dot"
+        name.any { it in FORBIDDEN || it.code < 32 } -> "Can't contain any of $FORBIDDEN"
+        else -> null
+    }
+}
+
+/** A PC folder id as people say it; null is the PC's own Beam folder. */
+internal fun folderLabel(id: String?): String = when {
+    id == null -> "Beam folder"
+    // A subfolder: "documents/Projects" → "Documents › Projects".
+    '/' in id -> "${folderLabel(id.substringBefore('/'))} › ${id.substringAfter('/')}"
+    // A folder the PC's owner pinned: "pin:Projects".
+    id.startsWith("pin:") -> id.removePrefix("pin:").ifBlank { "Pinned folder" }
+    id == "downloads" -> "Downloads"
+    id == "desktop" -> "Desktop"
+    id == "documents" -> "Documents"
+    id == "pictures" -> "Pictures"
+    id == "videos" -> "Videos"
+    else -> id.replaceFirstChar { it.uppercase() }
+}
+
+/** Shown until a computer is paired: the three steps, and the button to start. */
+@Composable
+private fun PairHint(onPair: () -> Unit) {
+    ListCard(Modifier.padding(top = 14.dp)) {
+        Row(
+            Modifier.fillMaxWidth().padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            IconTile(Icons.Filled.QrCodeScanner)
+            Column(Modifier.weight(1f)) {
+                Text("Pair your computer", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "1. On your computer, open Beam and click Your devices. A square code appears.\n" +
+                        "2. Tap Scan code and point your camera at it.",
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+                RowButton("Scan code", onPair)
+            }
+        }
     }
 }

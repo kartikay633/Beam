@@ -22,6 +22,8 @@ export interface Snapshot {
   trusted: TrustedDevice[];
   staged: StagedFile[];
   settings: Settings;
+  /** Active receiver folder; a saved change takes effect after restart. */
+  receiveDir: string;
   /** Why Bluetooth isn't available, or null when it works. */
   bluetoothProblem: string | null;
   /** Something to show once, e.g. a failed Wi-Fi join. */
@@ -75,7 +77,22 @@ export interface Settings {
   visibility: VisibilityMode;
   sendToShortcut: boolean;
   startWithWindows: boolean;
+  /** The first-run "stay ready in the background" question was answered. */
+  askedBackground: boolean;
+  /** Folders trusted devices may choose to save into. */
+  saveFolders: SaveFolderId[];
+  /** Other folders trusted devices may save into. */
+  pinnedFolders: string[];
 }
+
+export type SaveFolderId = "downloads" | "desktop" | "documents" | "pictures" | "videos";
+export const SAVE_FOLDERS: { id: SaveFolderId; label: string }[] = [
+  { id: "downloads", label: "Downloads" },
+  { id: "desktop", label: "Desktop" },
+  { id: "documents", label: "Documents" },
+  { id: "pictures", label: "Pictures" },
+  { id: "videos", label: "Videos" },
+];
 
 export interface Offer {
   id: string;
@@ -162,9 +179,12 @@ const demo: Snapshot = {
   ],
   trusted: [{ deviceId: "346e-029e-3df3-3625", name: "Kartikay's Pixel", autoAccept: true }],
   staged: [],
+  receiveDir: "C:\\Users\\you\\Downloads\\Beam",
   settings: {
     deviceName: "KARTIKAY-PC", downloadDir: "C:\\Users\\you\\Downloads\\Beam", streams: 4,
-    visibility: "everyone", sendToShortcut: true, startWithWindows: false,
+    visibility: "everyone", sendToShortcut: true, startWithWindows: false, askedBackground: false,
+    saveFolders: ["downloads", "desktop", "documents", "pictures", "videos"],
+    pinnedFolders: [],
   },
   bluetoothProblem: null,
   notice: null,
@@ -209,6 +229,11 @@ async function demoInvoke<T>(command: string, args: Record<string, unknown>): Pr
           mode: args.mode as VisibilityMode,
           everyoneUntilMs: args.mode === "everyone" ? Date.now() + 600_000 : null,
         };
+      });
+      break;
+    case "update_settings":
+      demoUpdate((s) => {
+        s.settings = { ...(args.settings as Settings) };
       });
       break;
     case "dismiss_notice":

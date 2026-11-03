@@ -274,17 +274,28 @@ pub struct HotspotInfo {
     pub passphrase: String,
 }
 
-/// A Wi-Fi Direct group the writer of a `CONNECT_REQUEST` hosts for this
-/// transfer (a laptop: Windows can keep its Wi-Fi network while hosting
-/// one). A phone joins it as a Wi-Fi Direct client with the name and
-/// passphrase, which Android allows without asking the user.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DirectGroup {
-    /// Starts with `DIRECT-` and two characters, as Android requires.
-    pub ssid: String,
-    pub passphrase: String,
-    /// The host's IPv4 address in the group.
-    pub addr: String,
+/// The Wi-Fi Direct device the writer of a `CONNECT_REQUEST` listens as
+/// for this transfer (a laptop). The phone finds it by name in Wi-Fi Direct
+/// discovery, or joins its credential-enabled Direct group when temporary
+/// credentials are present. The request carrying them is encrypted by GATT.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectPeer {
+    /// Its Wi-Fi Direct device name (a Windows PC's computer name).
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<String>,
+}
+
+impl std::fmt::Debug for DirectPeer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DirectPeer")
+            .field("name", &self.name)
+            .field("network_name", &self.network_name)
+            .field("has_passphrase", &self.passphrase.is_some())
+            .finish()
+    }
 }
 
 /// How the two devices will connect.
@@ -315,9 +326,9 @@ pub struct ConnectRequest {
     /// called): the TCP port it receives on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
-    /// Set when the writer hosts a Wi-Fi Direct group for this transfer.
+    /// Set when the writer accepts Wi-Fi Direct connections for this transfer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub direct: Option<DirectGroup>,
+    pub direct: Option<DirectPeer>,
 }
 
 /// `CONNECT_RESPONSE`, from the receiver: the link it chose.
@@ -744,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn a_wifi_direct_group_travels_in_the_request() {
+    fn a_wifi_direct_peer_travels_in_the_request() {
         let laptop = device("ThinkPad", DeviceType::Laptop);
         let server = GattServerHandshake::new();
         let info = server.info(&laptop, VisibilityMode::Everyone, 0);
@@ -754,15 +765,22 @@ mod tests {
             lan: vec!["172.16.144.19".into(), "192.168.137.1".into()],
             hotspot: None,
             port: Some(9000),
-            direct: Some(DirectGroup {
-                ssid: "DIRECT-Bm-4f2a".into(),
-                passphrase: "kq7Pz2mWx9LtR3vB".into(),
-                addr: "192.168.137.1".into(),
+            direct: Some(DirectPeer {
+                name: "KARTIKAY".into(),
+                network_name: Some("DIRECT-abBeam".into()),
+                passphrase: Some("temporary-direct-key".into()),
             }),
         };
         let (_, sealed, _) = GattClientHandshake::request(&info, &request).unwrap();
         let (received, _) = server.accept_request(&sealed).unwrap();
         assert_eq!(received, request);
+        assert!(!sealed
+            .windows(b"temporary-direct-key".len())
+            .any(|w| w == b"temporary-direct-key"));
+        assert!(
+            !format!("{request:?}").contains("temporary-direct-key"),
+            "debug output exposed Direct credentials"
+        );
         // Older senders leave the field out.
         let older: ConnectRequest = from_cbor(
             &to_cbor(&ConnectRequest {
@@ -773,6 +791,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(older.direct, None);
+    }
+
+    #[test]
+    fn an_old_direct_peer_without_credentials_remains_readable() {
+        #[derive(serde::Serialize)]
+        struct OldPeer {
+            name: &'static str,
+        }
+        let old = to_cbor(&OldPeer { name: "Laptop" });
+        let peer: DirectPeer = from_cbor(&old, "peer").unwrap();
+        assert_eq!(peer.name, "Laptop");
+        assert_eq!(peer.network_name, None);
+        assert_eq!(peer.passphrase, None);
     }
 
     #[test]

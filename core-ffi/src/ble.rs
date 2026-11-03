@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::{failed, lock, BeamError, DeviceKind, Inner, NearbyDevice, NearbyLink};
 use beam_core::ble::{
-    self, caps, ConnectRequest, ConnectResponse, DirectGroup, GattClientHandshake,
+    self, caps, ConnectRequest, ConnectResponse, DirectPeer, GattClientHandshake,
     GattServerHandshake, HotspotInfo, LinkKind, Reassembler, ResponseOpener, ResponseSealer,
 };
 
@@ -144,32 +144,41 @@ impl From<HotspotInfo> for HotspotCredentials {
     }
 }
 
-/// A Wi-Fi Direct group hosted for the transfer (by a laptop): join it as a
-/// Wi-Fi Direct client with this name and passphrase.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct BleDirectGroup {
-    pub ssid: String,
-    pub passphrase: String,
-    /// The host's IPv4 address in the group.
-    pub address: String,
+/// The Wi-Fi Direct device a laptop listens as for the transfer: find it
+/// by this name in Wi-Fi Direct discovery and connect (push button).
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BleDirectPeer {
+    pub name: String,
+    pub network_name: Option<String>,
+    pub passphrase: Option<String>,
 }
 
-impl From<BleDirectGroup> for DirectGroup {
-    fn from(g: BleDirectGroup) -> Self {
-        DirectGroup {
-            ssid: g.ssid,
-            passphrase: g.passphrase,
-            addr: g.address,
+impl std::fmt::Debug for BleDirectPeer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BleDirectPeer")
+            .field("name", &self.name)
+            .field("network_name", &self.network_name)
+            .field("has_passphrase", &self.passphrase.is_some())
+            .finish()
+    }
+}
+
+impl From<BleDirectPeer> for DirectPeer {
+    fn from(p: BleDirectPeer) -> Self {
+        DirectPeer {
+            name: p.name,
+            network_name: p.network_name,
+            passphrase: p.passphrase,
         }
     }
 }
 
-impl From<DirectGroup> for BleDirectGroup {
-    fn from(g: DirectGroup) -> Self {
-        BleDirectGroup {
-            ssid: g.ssid,
-            passphrase: g.passphrase,
-            address: g.addr,
+impl From<DirectPeer> for BleDirectPeer {
+    fn from(p: DirectPeer) -> Self {
+        BleDirectPeer {
+            name: p.name,
+            network_name: p.network_name,
+            passphrase: p.passphrase,
         }
     }
 }
@@ -187,8 +196,8 @@ pub struct BleConnectRequest {
     pub capabilities: u8,
     /// Set when the writer was called and will receive: its TCP port.
     pub port: Option<u16>,
-    /// Set when the writer hosts a Wi-Fi Direct group for this transfer.
-    pub direct: Option<BleDirectGroup>,
+    /// Set when the writer accepts Wi-Fi Direct connections for this transfer.
+    pub direct: Option<BleDirectPeer>,
 }
 
 /// The receiver's `CONNECT_RESPONSE`: the link it chose.

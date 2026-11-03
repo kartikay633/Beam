@@ -10,17 +10,26 @@ export function OfferWindow({ id }: { id: string }) {
   const [trust, setTrust] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
   const remaining = useCountdown(offer?.expiresMs ?? null);
 
   useEffect(() => {
-    api.offer(id).then(setOffer);
-  }, [id]);
+    let disposed = false;
+    setOffer(undefined);
+    setError(null);
+    setTrust(false);
+    api.offer(id).then((value) => { if (!disposed) setOffer(value); })
+      .catch((e) => { if (!disposed) setError(String(e)); });
+    return () => { disposed = true; };
+  }, [id, attempt]);
 
-  if (offer === undefined) return <div className="loading">Loading…</div>;
-  if (offer === null) return <div className="loading">This request has expired.</div>;
+  if (offer === undefined) return <div className="loading">{error ? <div role="alert"><p>{error}</p><button className="button" onClick={() => setAttempt((n) => n + 1)}>Try again</button></div> : "Loading…"}</div>;
+  if (offer === null || remaining === 0) return <div className="loading">This request has expired.</div>;
 
   const answer = async (accept: boolean) => {
+    if (busy || Date.now() >= offer.expiresMs) return;
     setBusy(true);
+    setError(null);
     try {
       // The backend closes this window once it has the answer.
       await api.respond(id, accept, accept && trust);
@@ -69,7 +78,7 @@ export function OfferWindow({ id }: { id: string }) {
           </label>
         )}
 
-        {error && <div className="notice error">{error}</div>}
+        {error && <div className="notice error" role="alert">{error}</div>}
       </div>
 
       <div className="offer-actions">
@@ -81,7 +90,7 @@ export function OfferWindow({ id }: { id: string }) {
         </button>
       </div>
       <div className="timeout" aria-label={`${Math.ceil(left)} seconds left to answer`}>
-        <div className="timeout-fill" style={{ width: `${(left / total) * 100}%` }} />
+        <div className="timeout-fill" style={{ width: `${Math.min(100, (left / total) * 100)}%` }} />
       </div>
     </div>
   );

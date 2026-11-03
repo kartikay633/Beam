@@ -1,138 +1,103 @@
-import { useEffect, useRef, useState } from "react";
-import { api, onSnapshot, type Snapshot, type VisibilityMode } from "./api";
-import { Home } from "./Home";
-import { PairPage } from "./Pair";
+import { useEffect, useState, type ReactNode } from "react";
+import { api, onSnapshot, type Snapshot } from "./api";
+import { ActivityPage } from "./Activity";
+import { DevicesPage } from "./Devices";
 import { SettingsPage } from "./SettingsPage";
-import { formatMinutesLeft } from "./format";
-import { BeamLogo, CheckIcon, ChevronDownIcon, ChevronLeftIcon, QrIcon, SlidersIcon } from "./icons";
+import { SharePage } from "./Share";
+import { BeamLogo, ClockIcon, GearIcon, PhoneIcon, ShareIcon } from "./icons";
 
-type Page = "home" | "pair" | "settings";
+export type Page = "share" | "activity" | "devices" | "settings";
 
-const TITLES: Record<Page, string> = { home: "Beam", pair: "Pair a phone", settings: "Settings" };
+const MAIN: { id: Page; label: string; icon: ReactNode }[] = [
+  { id: "share", label: "Share", icon: <ShareIcon size={18} /> },
+  { id: "activity", label: "Activity", icon: <ClockIcon size={18} /> },
+  { id: "devices", label: "Your devices", icon: <PhoneIcon size={18} /> },
+];
 
 /** The latest snapshot from the backend, kept up to date. */
-export function useSnapshot(): Snapshot | null {
+export function useSnapshot() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
+    let disposed = false;
+    let receivedEvent = false;
     let stop: (() => void) | undefined;
-    onSnapshot(setSnapshot).then((unlisten) => (stop = unlisten));
-    api.snapshot().then(setSnapshot);
-    return () => stop?.();
-  }, []);
-  return snapshot;
+    setError(null);
+    const failed = (e: unknown) => { if (!disposed) setError(String(e)); };
+    const connect = async () => {
+      // Subscribe before fetching: otherwise a change between the snapshot
+      // read and asynchronous listener registration can be lost indefinitely.
+      const unlisten = await onSnapshot((value) => {
+        receivedEvent = true;
+        if (!disposed) { setSnapshot(value); setError(null); }
+      });
+      if (disposed) { unlisten(); return; }
+      stop = unlisten;
+      const value = await api.snapshot();
+      if (!disposed && !receivedEvent) setSnapshot(value);
+    };
+    void connect().catch(failed);
+    return () => { disposed = true; stop?.(); };
+  }, [attempt]);
+  return { snapshot, error, retry: () => setAttempt((n) => n + 1) };
 }
 
 export function App() {
-  const snapshot = useSnapshot();
-  const [page, setPage] = useState<Page>("home");
+  const { snapshot, error, retry } = useSnapshot();
+  const [page, setPage] = useState<Page>("share");
 
   if (!snapshot) {
-    return <div className="loading">Starting Beam…</div>;
+    return <div className="loading">{error ? <div role="alert"><p>{error}</p><button className="button" onClick={retry}>Try again</button></div> : "Starting Beam…"}</div>;
   }
+  const active = snapshot.transfers.filter((t) => ["active", "waiting", "reconnecting"].includes(t.state)).length;
   return (
     <div className="app">
-      <header className="topbar">
-        {page === "home" ? (
-          <div className="brand">
-            <BeamLogo size={26} />
-            <span>Beam</span>
-          </div>
-        ) : (
-          <button className="back" onClick={() => setPage("home")}>
-            <ChevronLeftIcon size={18} />
-            <span>{TITLES[page]}</span>
-          </button>
-        )}
+      <nav className="nav" aria-label="Beam">
+        <div className="nav-brand">
+          <BeamLogo size={18} />
+          <span>Beam</span>
+        </div>
+        {MAIN.map((item) => (
+          <NavItem key={item.id} item={item} current={page === item.id} onSelect={setPage}>
+            {item.id === "activity" && active > 0 && <span className="nav-badge">{active}</span>}
+          </NavItem>
+        ))}
         <span className="grow" />
-        <VisibilityChip snapshot={snapshot} />
-        <button
-          className={`icon-button ${page === "pair" ? "current" : ""}`}
-          aria-label="Pair a phone"
-          title="Pair a phone"
-          onClick={() => setPage(page === "pair" ? "home" : "pair")}
-        >
-          <QrIcon size={19} />
-        </button>
-        <button
-          className={`icon-button ${page === "settings" ? "current" : ""}`}
-          aria-label="Settings"
-          title="Settings"
-          onClick={() => setPage(page === "settings" ? "home" : "settings")}
-        >
-          <SlidersIcon size={19} />
-        </button>
-      </header>
-      <main className="content">
-        {page === "home" && <Home snapshot={snapshot} />}
-        {page === "pair" && <PairPage />}
+        <NavItem
+          item={{ id: "settings", label: "Settings", icon: <GearIcon size={18} /> }}
+          current={page === "settings"}
+          onSelect={setPage}
+        />
+      </nav>
+      <main className="layer">
+        {error && <div className="notice error" role="alert"><span>{error}</span><button className="button" onClick={retry}>Reconnect</button></div>}
+        {page === "share" && <SharePage snapshot={snapshot} onNavigate={setPage} />}
+        {page === "activity" && <ActivityPage snapshot={snapshot} />}
+        {page === "devices" && <DevicesPage snapshot={snapshot} />}
         {page === "settings" && <SettingsPage snapshot={snapshot} />}
       </main>
     </div>
   );
 }
 
-const MODES: { id: VisibilityMode; label: string; hint: string }[] = [
-  { id: "everyone", label: "Everyone", hint: "Anyone nearby can find you, for 10 minutes" },
-  { id: "trusted", label: "Trusted devices", hint: "Only devices you trust can find you" },
-  { id: "off", label: "Hidden", hint: "Nobody can find or send to you" },
-];
-
-/** "Visible to everyone · 9 min": opens a menu to change who can see you. */
-function VisibilityChip({ snapshot }: { snapshot: Snapshot }) {
-  const { mode, everyoneUntilMs } = snapshot.visibility;
-  const remaining = useCountdown(everyoneUntilMs);
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const close = (e: MouseEvent | KeyboardEvent) => {
-      if (e instanceof KeyboardEvent ? e.key === "Escape" : !ref.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", close);
-    return () => {
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("keydown", close);
-    };
-  }, [open]);
-
-  const label =
-    mode === "everyone"
-      ? `Visible to everyone${remaining ? ` · ${formatMinutesLeft(remaining)}` : ""}`
-      : mode === "trusted"
-        ? "Visible to trusted devices"
-        : "Hidden";
+function NavItem({
+  item,
+  current,
+  onSelect,
+  children,
+}: {
+  item: { id: Page; label: string; icon: ReactNode };
+  current: boolean;
+  onSelect: (page: Page) => void;
+  children?: ReactNode;
+}) {
   return (
-    <div className="chip-menu" ref={ref}>
-      <button className="chip" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>
-        <span className={`dot ${mode}`} />
-        {label}
-        <ChevronDownIcon size={14} />
-      </button>
-      {open && (
-        <div className="menu" role="menu">
-          {MODES.map((m) => (
-            <button
-              key={m.id}
-              role="menuitemradio"
-              aria-checked={mode === m.id}
-              onClick={() => {
-                api.setVisibility(m.id);
-                setOpen(false);
-              }}
-            >
-              <span className={`dot ${m.id}`} />
-              <span className="menu-text">
-                <span>{m.label}</span>
-                <small>{m.hint}</small>
-              </span>
-              {mode === m.id && <CheckIcon size={16} />}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
+    <button className={`nav-item ${current ? "current" : ""}`} aria-current={current ? "page" : undefined} onClick={() => onSelect(item.id)}>
+      {item.icon}
+      <span className="grow">{item.label}</span>
+      {children}
+    </button>
   );
 }
 

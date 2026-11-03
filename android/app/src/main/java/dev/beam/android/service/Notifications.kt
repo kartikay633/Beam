@@ -18,6 +18,7 @@ object Notifications {
     const val CHANNEL_STATUS = "status"
     const val CHANNEL_OFFERS = "offers"
     const val CHANNEL_DONE = "done"
+    const val CHANNEL_SWITCHES = "switches"
     const val ID_STATUS = 1
 
     fun createChannels(context: Context) {
@@ -31,6 +32,9 @@ object Notifications {
                     description = "Someone wants to send you files"
                 },
                 NotificationChannel(CHANNEL_DONE, "Finished transfers", NotificationManager.IMPORTANCE_DEFAULT),
+                NotificationChannel(CHANNEL_SWITCHES, "Turn off reminders", NotificationManager.IMPORTANCE_HIGH).apply {
+                    description = "After you leave Beam: switch off the Bluetooth or Location it turned on"
+                },
             ),
         )
     }
@@ -129,6 +133,43 @@ object Notifications {
         .setContentIntent(openApp(context))
         .setAutoCancel(true)
         .build()
+
+    /**
+     * "Beam turned on Bluetooth and Location", with a button per switch.
+     * Android doesn't let apps turn these off, so each button opens the
+     * place where it's one tap.
+     */
+    @android.annotation.SuppressLint("MissingPermission") // Without the permission it just doesn't show.
+    fun offerSwitchingOff(context: Context, switches: List<dev.beam.android.radio.RadioSwitch>) {
+        if (switches.isEmpty()) return
+        val manager = androidx.core.app.NotificationManagerCompat.from(context)
+        if (!manager.areNotificationsEnabled()) return
+        val names = switches.map { it.label }
+        val list = if (names.size == 1) names[0] else names.dropLast(1).joinToString(", ") + " and " + names.last()
+        val builder = NotificationCompat.Builder(context, CHANNEL_SWITCHES)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("Beam turned on $list")
+            .setContentText("Done sending? Tap a button below, then switch ${if (names.size == 1) "it" else "each one"} off.")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+        switches.forEachIndexed { i, switch ->
+            val action = when (switch) {
+                dev.beam.android.radio.RadioSwitch.BLUETOOTH -> android.provider.Settings.ACTION_BLUETOOTH_SETTINGS
+                dev.beam.android.radio.RadioSwitch.WIFI -> android.provider.Settings.Panel.ACTION_WIFI
+                dev.beam.android.radio.RadioSwitch.LOCATION -> android.provider.Settings.ACTION_LOCATION_SOURCE_SETTINGS
+            }
+            val open = PendingIntent.getActivity(
+                context,
+                100 + i,
+                Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+            builder.addAction(0, "Turn off ${switch.label}", open)
+        }
+        manager.notify(ID_SWITCHES, builder.build())
+    }
+
+    const val ID_SWITCHES = 2
 
     fun files(count: Int) = if (count == 1) "1 file" else "$count files"
 }

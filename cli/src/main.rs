@@ -274,6 +274,7 @@ async fn receive(
     let config = ReceiverConfig {
         device: device.clone(),
         download_dir: dir.clone(),
+        save_folders: Default::default(),
         trust: trust.clone(),
         visibility: visibility.clone(),
         pairing: pairing.clone(),

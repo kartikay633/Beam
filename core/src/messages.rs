@@ -96,7 +96,19 @@ pub struct Offer {
     pub transfer_id: Uuid,
     pub files: Vec<FileEntry>,
     pub total_size: u64,
+    /// Where the sender would like the files saved: one of the ids the
+    /// receiver listed in its HELLO (see [`SAVE_TO_PREFIX`]). A receiver
+    /// that doesn't know the id, or doesn't trust the sender, uses its
+    /// default folder. Never a path. Added in protocol 1.1; older peers
+    /// leave it out and ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
 }
+
+/// A HELLO capability `save-to:<id>` says the receiver will save into the
+/// folder it calls `<id>` (for example `save-to:desktop`) when asked in an
+/// [`Offer`]. Receivers list these only to trusted senders.
+pub const SAVE_TO_PREFIX: &str = "save-to:";
 
 /// Chunks of one file the receiver already has verified (for resume).
 /// Bit `i` is chunk `i`: byte `i / 8`, bit `i % 8`, least significant bit first.

@@ -49,6 +49,22 @@ enum class Screen(val title: String) {
 
 @Composable
 fun BeamScreen(vm: BeamViewModel, onRetry: () -> Unit) {
+    val settings = (LocalContext.current.applicationContext as dev.beam.android.BeamApp).settings
+    var onboarded by rememberSaveable { mutableStateOf(settings.onboarded) }
+    var touring by rememberSaveable { mutableStateOf(!settings.onboarded) }
+    if (touring) {
+        TutorialScreen { touring = false }
+        return
+    }
+    if (!onboarded) {
+        SetupScreen {
+            settings.onboarded = true
+            onboarded = true
+            vm.refreshRadio()
+        }
+        return
+    }
+    SwitchesOnWhenOpened(vm::refreshRadio)
     val state by vm.state.collectAsStateWithLifecycle()
     val staged by vm.staged.collectAsStateWithLifecycle()
     var screen by rememberSaveable { mutableStateOf(Screen.HOME) }
@@ -101,7 +117,7 @@ fun BeamScreen(vm: BeamViewModel, onRetry: () -> Unit) {
                     onShowTransfers = { screen = Screen.TRANSFERS },
                 )
                 Screen.TRANSFERS -> TransfersScreen(state, vm)
-                Screen.SETTINGS -> SettingsScreen(state, vm) { screen = Screen.PAIR }
+                Screen.SETTINGS -> SettingsScreen(state, vm, onTour = { touring = true }) { screen = Screen.PAIR }
             }
         }
     }

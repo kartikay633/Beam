@@ -10,12 +10,14 @@ import dev.beam.android.data.BeamRepository
 import dev.beam.android.data.BeamState
 import dev.beam.android.data.DiscoveryChoice
 import dev.beam.android.data.FileAccess
+import dev.beam.android.data.OpenedFiles
 import dev.beam.android.data.SettingsStore
 import dev.beam.android.data.StagedFile
 import dev.beam.android.share.DirectShare
 import dev.beam.core.NearbyDevice
 import dev.beam.core.Visibility
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -58,7 +60,8 @@ class BeamViewModel(
         viewModelScope.launch {
             val described = withContext(io) { uris.mapNotNull { runCatching { files.describe(it) }.getOrNull() } }
             _staged.update { (it + described).distinctBy { file -> file.uri } }
-            sendTo(device)
+            if (described.size < uris.size) repository.showMessage("Some files couldn't be read")
+            sendFiles(device, selectedFiles(described))
         }
     }
 
@@ -72,6 +75,9 @@ class BeamViewModel(
         viewModelScope.launch {
             val described = withContext(io) { uris.mapNotNull { runCatching { files.describe(it) }.getOrNull() } }
             _staged.update { (it + described).distinctBy { file -> file.uri } }
+            if (described.size < uris.size) repository.showMessage("Some files couldn't be read")
+            val selected = selectedFiles(described)
+            if (selected.isEmpty()) return@launch
             val name = state.value.trusted.firstOrNull { it.deviceId == deviceId }?.name ?: "That device"
             val device = withTimeoutOrNull(DIRECT_SHARE_WAIT_MS) {
                 state.map { s -> s.nearby.firstOrNull { it.deviceId == deviceId } }.filterNotNull().first()
@@ -79,7 +85,10 @@ class BeamViewModel(
             if (device == null) {
                 repository.showMessage("$name isn't nearby. Pick a device below.")
             } else {
-                sendTo(device)
+                // Retain this request's selection, not whatever another share
+                // has staged while discovery was waiting. Removed/replaced
+                // entries no longer belong to this pending request.
+                sendFiles(device, selected.filter { file -> _staged.value.any { it === file } })
             }
         }
     }
@@ -89,21 +98,39 @@ class BeamViewModel(
     fun clearStaged() = _staged.update { emptyList() }
 
     /** Sends the staged files to [device]. */
-    fun sendTo(device: NearbyDevice) {
-        val toSend = _staged.value
+    fun sendTo(device: NearbyDevice) = sendFiles(device, _staged.value)
+
+    /** Where files sent to [device] land on it (null: its default folder). */
+    fun setSaveTo(device: NearbyDevice, folder: String?) = repository.setSaveTo(device, folder)
+
+    private fun selectedFiles(described: List<StagedFile>): List<StagedFile> =
+        _staged.value.filter { staged -> described.any { it.uri == staged.uri } }
+
+    private fun sendFiles(device: NearbyDevice, toSend: List<StagedFile>) {
         if (toSend.isEmpty()) return
-        _staged.value = emptyList()
+        _staged.update { staged -> staged.filterNot { file -> toSend.any { it === file } } }
         viewModelScope.launch {
-            val opened = withContext(io) { runCatching { files.open(toSend) } }
-            opened
-                .onSuccess {
-                    repository.send(device, it.files, it.cleanup)
-                    onSend(device.deviceId)
+            var owned: OpenedFiles? = null
+            try {
+                // Keep ownership outside withContext: prompt cancellation can
+                // discard its result after the provider has opened descriptors.
+                withContext(io) { owned = files.open(toSend) }
+                val opened = checkNotNull(owned)
+                repository.send(device, opened.files, onUnsent = opened.closeUnsent, cleanup = opened.cleanup)
+                owned = null
+                // Share-sheet ranking is advisory; failure here must never
+                // restore files that the transfer engine already owns.
+                runCatching { onSend(device.deviceId) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _staged.update { (toSend + it).distinctBy { file -> file.uri } }
+                repository.showMessage("Couldn't read the files: ${BeamRepository.describe(e)}")
+            } finally {
+                owned?.let { opened ->
+                    try { opened.closeUnsent() } finally { opened.cleanup() }
                 }
-                .onFailure {
-                    _staged.value = toSend
-                    repository.showMessage("Couldn't read the files: ${BeamRepository.describe(it)}")
-                }
+            }
         }
     }
 

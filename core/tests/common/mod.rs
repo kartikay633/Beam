@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use beam_core::{
     BoxFuture, Decision, DeviceType, Identity, IncomingOffer, LocalDevice, PairingWindow, Progress,
-    ReceiveHandler, ReceiveOutcome, Receiver, ReceiverConfig, ReceiverHandle, TransferError,
-    TransferSummary, TrustStore, TrustedDevice, Visibility, VisibilityMode,
+    ReceiveHandler, ReceiveOutcome, Receiver, ReceiverConfig, ReceiverHandle, SaveFolders,
+    TransferError, TransferSummary, TrustStore, TrustedDevice, Visibility, VisibilityMode,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -183,12 +183,33 @@ impl TestReceiver {
         visibility: Visibility,
         decide: impl Fn(&IncomingOffer) -> Decision + Send + Sync + 'static,
     ) -> TestReceiver {
+        Self::start_saving(
+            me,
+            trust,
+            download_dir,
+            visibility,
+            SaveFolders::default(),
+            decide,
+        )
+        .await
+    }
+
+    /// Like [`TestReceiver::start_with`], offering `save_folders` to trusted senders.
+    pub async fn start_saving(
+        me: LocalDevice,
+        trust: TrustStore,
+        download_dir: &Path,
+        visibility: Visibility,
+        save_folders: SaveFolders,
+        decide: impl Fn(&IncomingOffer) -> Decision + Send + Sync + 'static,
+    ) -> TestReceiver {
         let pairing = PairingWindow::default();
         let receiver = Receiver::bind(
             "127.0.0.1:0",
             ReceiverConfig {
                 device: me,
                 download_dir: download_dir.to_path_buf(),
+                save_folders,
                 trust,
                 visibility,
                 pairing: pairing.clone(),

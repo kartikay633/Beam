@@ -19,8 +19,12 @@ import dev.beam.core.TrustedDevice
 import dev.beam.core.Visibility
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -34,6 +38,13 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /** Everything the UI and the service show. */
+/**
+ * Whether [folders] (a PC's save-to list) still has the folder [chosen] is
+ * in: "documents/Trip" only needs "documents", since a new subfolder isn't
+ * listed until the PC has made it.
+ */
+internal fun offersRoot(folders: List<String>, chosen: String) = chosen.substringBefore('/') in folders
+
 data class BeamState(
     val running: Boolean = false,
     val starting: Boolean = false,
@@ -49,6 +60,10 @@ data class BeamState(
     val trusted: List<TrustedDevice> = emptyList(),
     /** A one-off message ("Paired with ThinkPad"), cleared by the UI. */
     val message: String? = null,
+    /** Folders each trusted PC lets us pick, by [saveKey]. */
+    val saveFolders: Map<String, List<String>> = emptyMap(),
+    /** The folder picked for each PC, by [saveKey]; absent for its default. */
+    val saveTo: Map<String, String> = emptyMap(),
 ) {
     /** Transfers that are moving data (or about to): hold the Wi-Fi and wake locks. */
     val busy: List<TransferUi>
@@ -107,6 +122,7 @@ class BeamRepository(
     private val io: CoroutineDispatcher = Dispatchers.IO,
     /** Set once the app is built; it needs this repository's state. */
     var radio: OfflineRadio? = null,
+    private val pairingDeviceId: (String) -> String = { dev.beam.core.parsePairingCode(it).deviceId },
 ) {
     private val _state = MutableStateFlow(BeamState(deviceName = settings.deviceName))
     val state: StateFlow<BeamState> = _state.asStateFlow()
@@ -122,9 +138,10 @@ class BeamRepository(
     suspend fun start() = lifecycle.withLock {
         if (node != null) return@withLock
         _state.update { it.copy(starting = true, error = null) }
+        var acquired: BeamNodeInterface? = null
         try {
             withContext(io) {
-                val created = createNode(settings, listener)
+                val created = createNode(settings, listener).also { acquired = it }
                 created.setStreams(settings.streams.toUInt())
                 created.setLanAddresses(lanAddresses)
                 created.start()
@@ -137,14 +154,27 @@ class BeamRepository(
                         deviceId = created.deviceId(),
                         deviceName = created.deviceName(),
                         trusted = created.trustedDevices(),
-                    )
+                    ).withSaveFolders(created.trustedDevices())
                 }
                 visibilityChanged(created.visibility())
             }
         } catch (e: Exception) {
-            node?.let(::close)
             node = null
-            _state.update { it.copy(error = describe(e)) }
+            everyoneJob?.cancel()
+            // A constructor/startup failure or prompt cancellation may happen
+            // before node is published, or after adapters have acquired radios.
+            // Unwind every owner even if another cleanup operation fails.
+            withContext(NonCancellable + io) {
+                if (acquired != null) {
+                    runCatching { radio?.stop() }
+                    runCatching { platformDiscovery?.stop() }
+                    runCatching { acquired?.stop() }
+                    runCatching { acquired?.let(::close) }
+                }
+            }
+            _state.update { it.copy(running = false, nearby = emptyList(), offers = emptyList(),
+                everyoneUntilMs = null, error = if (e is CancellationException) null else describe(e)) }
+            if (e is CancellationException) throw e
         } finally {
             _state.update { it.copy(starting = false) }
         }
@@ -200,26 +230,37 @@ class BeamRepository(
      * through a Bluetooth handshake and a Wi-Fi link when it isn't. Returns
      * the transfer id.
      */
-    fun send(device: NearbyDevice, files: List<OutgoingFile>, cleanup: () -> Unit = {}): String {
+    fun send(device: NearbyDevice, files: List<OutgoingFile>, onUnsent: () -> Unit = {}, cleanup: () -> Unit = {}): String {
         val id = UUID.randomUUID().toString()
         val current = node
-        val job = scope.launch(io) {
+        val handedToRust = AtomicBoolean(false)
+        // Register before executing: a fast dispatcher can otherwise finish
+        // setup before the caller inserts its job in the cancellation map.
+        val job = scope.launch(io, start = CoroutineStart.LAZY) {
+            val handOver = { handedToRust.set(true) }
             try {
                 checkNotNull(current) { "Beam isn't running" }
+                val key = saveKey(device.name)
+                val folder = _state.value.saveTo[key]?.takeIf { offersRoot(_state.value.saveFolders[key].orEmpty(), it) }
+                current.setSaveTo(id, folder)
                 if (device.link == NearbyLink.BLUETOOTH) {
-                    sendOffline(current, id, device, files)
+                    sendOffline(current, id, device, files, handOver)
                 } else {
-                    try {
-                        current.send(id, device.deviceId, files)
+                    val target = try {
+                        // Resolve first. A failed send has already closed its
+                        // descriptors, so retrying the same files is unsafe.
+                        current.resolveTarget(device.deviceId)
                     } catch (e: BeamException) {
                         // Its LAN addresses didn't answer (a network that
                         // keeps devices apart, or stale addresses): try
                         // Bluetooth if it's in range.
                         val route = current.bluetoothRoute(device.deviceId)
                         if (route == null || radio?.available != true) throw e
-                        linking[id] = coroutineContext[Job]!!
-                        sendOffline(current, id, route, files)
+                        sendOffline(current, id, route, files, handOver)
+                        return@launch
                     }
+                    handOver()
+                    current.sendTo(id, target.address, target.deviceId, device.name, files)
                 }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) {
@@ -227,16 +268,21 @@ class BeamRepository(
                 } else {
                     failSend(id, device.name, files, describe(e))
                 }
-            } finally {
-                linking.remove(id)
-                cleanup()
             }
         }
-        if (device.link == NearbyLink.BLUETOOTH) linking[id] = job
+        linking[id] = job
+        // Completion handlers also run if Cancel happens before the body
+        // starts, when a coroutine's finally block would never execute.
+        job.invokeOnCompletion {
+            linking.remove(id)
+            if (!handedToRust.get()) onUnsent()
+            cleanup()
+        }
+        job.start()
         return id
     }
 
-    private suspend fun sendOffline(node: BeamNodeInterface, id: String, device: NearbyDevice, files: List<OutgoingFile>) {
+    private suspend fun sendOffline(node: BeamNodeInterface, id: String, device: NearbyDevice, files: List<OutgoingFile>, handOver: () -> Unit) {
         val radio = checkNotNull(radio) { "This phone has no Bluetooth LE" }
         _state.update { s ->
             val row = TransferUi(id, true, device.name, files.take(5).map { it.name }, files.size, 0, status = "Connecting over Bluetooth…")
@@ -247,7 +293,7 @@ class BeamRepository(
         }
         try {
             // From here the node reports progress like any other send.
-            linking.remove(id)
+            handOver()
             node.sendTo(id, link.address, link.deviceId, device.name, files)
         } finally {
             link.release()
@@ -255,7 +301,8 @@ class BeamRepository(
     }
 
     fun cancel(transferId: String) {
-        linking.remove(transferId)?.cancel() ?: node?.cancel(transferId)
+        linking.remove(transferId)?.cancel()
+        node?.cancel(transferId)
     }
 
     fun respond(offerId: String, accept: Boolean, trust: Boolean) {
@@ -272,10 +319,21 @@ class BeamRepository(
     suspend fun pair(code: String): Result<TrustedDevice> = withContext(io) {
         val current = node ?: return@withContext Result.failure(IllegalStateException("Beam isn't running"))
         try {
-            val device = current.pair(code)
+            val device = try {
+                current.pair(code)
+            } catch (e: BeamException) {
+                // The code may contain the laptop's old LAN addresses. Set
+                // up a private link while retaining the QR's key and token.
+                val offline = radio
+                if (!describe(e).contains("didn't answer on any of its addresses") || offline?.available != true) throw e
+                val route = current.bluetoothRoute(pairingDeviceId(code)) ?: throw e
+                val link = offline.connect(route) { showMessage(it) }
+                try { current.pairAt(code, link.address) } finally { link.release() }
+            }
             refreshTrusted()
             Result.success(device)
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(IllegalStateException(describe(e)))
         }
     }
@@ -302,7 +360,24 @@ class BeamRepository(
 
     private fun refreshTrusted() {
         val current = node ?: return
-        _state.update { it.copy(trusted = current.trustedDevices()) }
+        val trusted = current.trustedDevices()
+        _state.update { it.copy(trusted = trusted).withSaveFolders(trusted) }
+    }
+
+    /** Fills in the remembered save folders of [trusted] PCs. */
+    private fun BeamState.withSaveFolders(trusted: List<TrustedDevice>): BeamState {
+        val keys = trusted.map { saveKey(it.name) }
+        return copy(
+            saveFolders = keys.associateWith { settings.saveFolders(it) }.filterValues { it.isNotEmpty() },
+            saveTo = keys.mapNotNull { key -> settings.saveTo(key)?.let { key to it } }.toMap(),
+        )
+    }
+
+    /** Where files sent to [device] should land on it: one of its offered folders, or null for its default. */
+    fun setSaveTo(device: NearbyDevice, folder: String?) {
+        val key = saveKey(device.name)
+        settings.setSaveTo(key, folder)
+        _state.update { s -> s.copy(saveTo = if (folder == null) s.saveTo - key else s.saveTo + (key to folder)) }
     }
 
     private fun visibilityChanged(visibility: Visibility) {
@@ -359,16 +434,20 @@ class BeamRepository(
             s.copy(offers = s.offers.filterNot { it.offerId == offerId })
         }
 
-        override fun transferStarted(transfer: TransferInfo) = _state.update { s ->
-            val row = TransferUi(
-                id = transfer.transferId,
-                sending = transfer.direction == Direction.SEND,
-                peerName = transfer.peerName,
-                fileNames = transfer.fileNames,
-                fileCount = transfer.fileCount.toInt(),
-                totalBytes = transfer.totalBytes.toLong(),
-            )
-            s.copy(transfers = TransferReducer.started(s.transfers, row))
+        override fun transferStarted(transfer: TransferInfo) {
+            // The native cancellation handle exists before this callback.
+            if (transfer.direction == Direction.SEND) linking.remove(transfer.transferId)
+            _state.update { s ->
+                val row = TransferUi(
+                    id = transfer.transferId,
+                    sending = transfer.direction == Direction.SEND,
+                    peerName = transfer.peerName,
+                    fileNames = transfer.fileNames,
+                    fileCount = transfer.fileCount.toInt(),
+                    totalBytes = transfer.totalBytes.toLong(),
+                )
+                s.copy(transfers = TransferReducer.started(s.transfers, row))
+            }
         }
 
         override fun transferStatus(transferId: String, status: String, verificationCode: String?) = _state.update { s ->
@@ -402,6 +481,19 @@ class BeamRepository(
                     s.copy(transfers = saved.map { if (it.id == transferId) it.copy(status = note) else it })
                 }
             }
+        }
+
+        override fun saveFoldersOffered(deviceId: String, folders: List<String>) {
+            val s = _state.value
+            val name = s.trusted.firstOrNull { it.deviceId == deviceId }?.name
+                ?: s.nearby.firstOrNull { it.deviceId == deviceId }?.name
+                ?: return
+            val key = saveKey(name)
+            settings.setSaveFolders(key, folders)
+            if (settings.saveTo(key)?.let { !offersRoot(folders, it) } == true) settings.setSaveTo(key, null)
+            _state.update { it.copy(saveFolders = it.saveFolders + (key to folders)).let { st ->
+                if (st.saveTo[key]?.let { f -> !offersRoot(folders, f) } == true) st.copy(saveTo = st.saveTo - key) else st
+            } }
         }
 
         override fun paired(device: TrustedDevice) {

@@ -1,0 +1,15 @@
+{
+  "profile": "product-admin",
+  "sourceRoots": ["desktop/ui/src"],
+  "locale": "en-US",
+  "canonicalMap": "UX-CONTRACT.md",
+  "requiredCapabilities": ["Select/Listbox", "Form", "Scrollbar"],
+  "ownership": { "Select/Listbox": "native" },
+  "requiredCommands": ["typecheck", "build", "e2e"],
+  "commands": {
+    "typecheck": "npm --prefix desktop run typecheck",
+    "build": "npm --prefix desktop run build",
+    "e2e": "npm --prefix desktop test"
+  },
+  "evidence": { "failurePaths": "desktop/tests/workflows.spec.ts" }
+}

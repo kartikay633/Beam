@@ -69,6 +69,12 @@ jobs:
       - name: Type-check and build the UI
         run: npm run build
 
+      - name: Install the browser for UI regression tests
+        run: npx playwright install chromium
+
+      - name: Test desktop workflows
+        run: npm test
+
       - name: Clippy
         run: cargo clippy -p beam-desktop --all-targets -- -D warnings
 
@@ -86,6 +92,9 @@ jobs:
 
       # Placeholder identity: checks the Store package still builds. The
       # real one is packed with the Partner Center identity (msix/README.md).
+      - name: Build the Bluetooth wake-up task
+        run: cargo build --release -p beam-wake-task
+
       - name: Package for the Microsoft Store (.msix)
         shell: pwsh
         run: ./msix/build-msix.ps1
@@ -132,7 +141,7 @@ jobs:
       # the instrumented tests (running those needs a device).
       - name: Build and test
         working-directory: android
-        run: ./gradlew assembleDebug testDebugUnitTest assembleDebugAndroidTest lintDebug --console=plain
+        run: ./gradlew assembleDebug assembleRelease testDebugUnitTest assembleDebugAndroidTest lintDebug lintRelease --console=plain
 
       - uses: actions/upload-artifact@v4
         with:

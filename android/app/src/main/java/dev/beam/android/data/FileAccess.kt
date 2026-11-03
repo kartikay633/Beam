@@ -18,7 +18,7 @@ import java.util.UUID
 data class StagedFile(val uri: String, val name: String, val size: Long?)
 
 /** Files opened for sending, and what to delete once the send is over. */
-class OpenedFiles(val files: List<OutgoingFile>, val cleanup: () -> Unit)
+class OpenedFiles(val files: List<OutgoingFile>, val closeUnsent: () -> Unit = {}, val cleanup: () -> Unit)
 
 /** Reads shared files. Faked in tests. */
 interface FileAccess {
@@ -68,7 +68,11 @@ class AndroidFileAccess(private val context: Context) : FileAccess {
             copies.deleteRecursively()
             throw e
         }
-        return OpenedFiles(opened) { copies.deleteRecursively() }
+        return OpenedFiles(opened, closeUnsent = {
+            opened.forEach { (it.source as? FileSource.Fd)?.let { fd ->
+                runCatching { ParcelFileDescriptor.adoptFd(fd.fd).close() }
+            } }
+        }, cleanup = { copies.deleteRecursively() })
     }
 
     private fun openOne(file: StagedFile, copies: File): OutgoingFile {

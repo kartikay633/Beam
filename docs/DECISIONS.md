@@ -847,7 +847,11 @@ in "trusted only" mode couldn't see it at all. A debug key isn't a
 secret. Release builds for the Play Store will need a real upload key,
 kept out of the repo.
 
-## 2026-10-29 — The laptop hosts Wi-Fi Direct; the phone joins it by name
+## 2026-10-29 — The laptop hosts Wi-Fi Direct (joining revised 2026-10-31)
+
+The name/passphrase joining approach below records the original decision.
+The 2026-10-31 repair supersedes it with public peer discovery and WPS PBC;
+see the following entry.
 
 **What:** With no shared network, the link is now: LAN, then a Wi-Fi Direct
 group the *laptop* hosts, then the phone's hotspot. The laptop offers the
@@ -873,3 +877,114 @@ passphrase. The hotspot is started only if that fails.
 
 The adapter reports "0 concurrent channels": the group must share the
 channel of the laptop's Wi-Fi connection, which Windows does by itself.
+
+## 2026-10-31 — Bound private-link setup and preserve fallback
+
+**What:** Keep LAN → laptop Wi-Fi Direct → Android local-only hotspot.
+Probe the actual TCP endpoint before using LAN; an address prefix is not
+evidence of reachability. Android discovers the laptop's P2P peer and uses
+the public `WifiP2pConfig` PBC path without creating its own preliminary
+group or modifying a Parcel. A discovered peer need not already report
+`isGroupOwner`. Windows creates Wi-Fi Direct operations on its UI thread,
+checks pairing results and releases operations, event handlers and network
+leases on failure or cancellation. In-flight calls cannot overlap.
+
+**Why:** Real logs showed a phone waiting on the group-owner flag and
+Windows returning unsuccessful pairing/connection results. The previous
+Android group mutation could create a temporary group before the intended
+transfer. Fallback credentials must survive a failed Direct attempt.
+Microsoft's [Wi-Fi Direct advertiser sample](https://raw.githubusercontent.com/microsoft/Windows-universal-samples/main/Samples/WiFiDirect/cs/Scenario1_Advertiser.xaml.cs)
+requires `WiFiDirectDevice.FromIdAsync` to be called on the UI thread.
+
+**Ownership:** Resolve the route before handing Android descriptors to
+Rust. A descriptor is submitted only once; setup cancellation closes
+unsent descriptors. Dropping an FFI send future aborts its runtime task.
+QR pairing may substitute the newly negotiated address, retaining the
+original pinned identity and one-time token.
+
+**Validation limit:** Software regressions and packaging are checked;
+this repaired build has not completed a physical Android ↔ Windows
+Wi-Fi Direct or fallback transfer. Bluetooth LE remains required for
+offline discovery/control. This is a repair candidate, not a validated
+production release.
+
+## 2026-11-02 — Preserve the PC's current Wi-Fi
+
+**User requirement:** A file transfer must not replace the PC's current
+Wi-Fi connection. The earlier automatic Android-hotspot fallback is
+superseded for Windows 0.1.2.
+
+**Decision:** Advertise LAN and Wi-Fi Direct only. Remove production
+hotspot join and delayed disconnection/restoration code, and reject a
+hotspot response before choosing a route. Fail rather than switching
+SSIDs if Direct and LAN are unavailable. Do not introduce an automatic
+network switch or an extra settings decision.
+
+**Evidence:** Windows WLAN events confirm AndroidShare replaced the
+college network. One handshake answered in 8 s but joining took another
+18 s. The user confirmed Android Location was off; Android requires it
+for Wi-Fi Direct peer discovery. The new build also combines three
+characteristic-discovery requests into one and records setup timings.
+
+**Limit:** Physical Direct interoperability and ten-second setup remain
+unverified. Windows 0.1.2 is compatible with the existing Android 0.1.1;
+the Android app and shared Rust protocol remain at 0.1.1. Concurrent Wi-Fi
+and Direct ultimately depend on the hardware/driver.
+
+## 2026-11-02 — Negotiate Direct before creating the group
+
+**Correction:** The user clarified the phone is not associated with a
+Wi-Fi network. Its MIUI temporary-disconnection prompt does not establish
+a conflict between two existing STA channels. Approving the prompt promptly
+still failed on 0.1.2. Do not infer a universal hardware limitation from it.
+
+**Candidate:** Standard nonautonomous Windows discovery, with owner
+preference 14 and the existing Android client preference 0, lets group
+formation negotiate rather than joining a group pre-formed on a channel.
+This changes Windows only (0.1.3), retaining Android/core 0.1.1. No private
+channel API, SSID switching, unpairing or bypassed consent is introduced.
+
+**Proven lifecycle defects:** The old acceptance window admitted a late
+request after the call had failed. Admission now requires a live lease;
+last-lease release cancels pending WinRT pairing/connection operations.
+Publisher and transfer-session UUIDs prevent old results from attaching
+to a replacement publisher or a fast retry on the same publisher.
+
+**Proof boundary:** The negotiated publisher starts on this PC while its
+existing Wi-Fi profiles remain unchanged; regression tests pass. A phone
+Direct transfer and ten-second setup remain unverified. See
+[0.1.3 notes](RELEASE-0.1.3.md) for the actual evidence and next test.
+
+## 2026-11-03 — Reuse provisioned Direct groups and prefer Invitation
+
+Windows 0.1.6 retains negotiated/PBC groups and prefers Invitation so the
+accepting side selects push-button configuration. Android 0.1.4 retains an
+established group briefly between transfers. Reference-counted leases and
+generation-bound timers protect active and later transfers; a managed P2P
+address reached by LAN probing must still retain Direct ownership on both
+sides. Windows reuses connected idle hosts and neither platform tears down
+an interface while native transfer activity uses it.
+
+The legacy credential experiment is disabled for current Windows offers:
+this phone attempted the correct SSID but received association denial12,
+before an application request reached Windows. Optional encrypted wire
+fields remain compatible. No SSID-joining, hidden Android fields or
+automatic hotspot switching was reintroduced.
+
+Physical files passed hash checks in both directions; consecutive Direct
+setup measured4.75s, fresh setup11–25s including OS approval. Later tests
+ran after the user switched PC internet to their personal phone hotspot.
+The installed app's normal Bluetooth/LAN send succeeded in that topology;
+it is not another cold Direct proof. See [0.1.6 notes](RELEASE-0.1.6.md).
+
+## 2026-11-03: preserve receiver lifetime when changing settings
+
+Download folder changes apply after restart, like device-name changes. The old
+save path replaced the receiver while its listener was still bound, moved to an
+ephemeral port and left mDNS advertising the old one. Keeping the receiver avoids
+interrupting active data routes and retains resume/cancellation state. Snapshot
+`receiveDir` identifies the actual live folder separately from saved settings.
+OS integration changes are applied before committing settings and rolled back on
+failure. Direct Share requests retain their exact staged selection while waiting.
+No connection policy or trust policy changed in this offline audit; see [0.1.7
+notes](RELEASE-0.1.7.md) for proofs and hardware limitations.

@@ -394,7 +394,7 @@ dependencies = [
 
 [[package]]
 name = "beam-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "beam-core",
@@ -406,7 +406,7 @@ dependencies = [
 
 [[package]]
 name = "beam-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -431,7 +431,7 @@ dependencies = [
 
 [[package]]
 name = "beam-core-ffi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "beam-core",
  "hex",
@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "beam-desktop"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "beam-core",
  "dirs 7.0.0",
@@ -459,9 +459,19 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
+ "tauri-winrt-notification",
  "tokio",
  "uuid",
  "windows",
+ "windows-collections",
+]
+
+[[package]]
+name = "beam-wake-task"
+version = "0.1.0"
+dependencies = [
+ "windows",
+ "windows-core",
 ]
 
 [[package]]
@@ -4790,6 +4800,17 @@ dependencies = [
  "dunce",
  "embed-resource",
  "toml 1.1.8+spec-1.1.0",
+]
+
+[[package]]
+name = "tauri-winrt-notification"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f37a6c354fd28fc9e322ed9bd47e3959576dad28c9d58ea1cf888cce1c7ccb36"
+dependencies = [
+ "thiserror 2.0.21",
+ "windows",
+ "windows-version",
 ]
 
 [[package]]

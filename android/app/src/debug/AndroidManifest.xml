@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds only: a hook to test Wi-Fi Direct joins from a computer. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <receiver
+            android:name=".debug.P2pDebugReceiver"
+            android:exported="true"
+            tools:ignore="ExportedReceiver"
+            xmlns:tools="http://schemas.android.com/tools">
+            <intent-filter>
+                <action android:name="dev.beam.android.DEBUG_P2P_CONNECT" />
+                <action android:name="dev.beam.android.DEBUG_P2P_LEAVE" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>
