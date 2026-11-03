@@ -92,6 +92,9 @@ jobs:
 
       # Placeholder identity: checks the Store package still builds. The
       # real one is packed with the Partner Center identity (msix/README.md).
+      - name: Build the Bluetooth wake-up task
+        run: cargo build --release -p beam-wake-task
+
       - name: Package for the Microsoft Store (.msix)
         shell: pwsh
         run: ./msix/build-msix.ps1

@@ -1,5 +1,10 @@
 # Stage 3 spike: waking a closed Beam over Bluetooth
 
+**Built into Beam 0.2.2 (Store package):** desktop/wake-task,
+desktop/src-tauri/src/wake.rs and desktop/msix/AppxManifest.xml. Tested on
+2026-11-03: after Quit, opening Beam on the phone relaunched
+`Beam.exe --minimized` in the tray with no window.
+
 2026-11-03. Code in `spikes/ble-wake` (the app) and `spikes/ble-wake-task`
 (the background task). Neither is part of the Beam build.
 

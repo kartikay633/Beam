@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "beam-desktop"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "beam-core",
  "dirs 7.0.0",
@@ -464,6 +464,14 @@ dependencies = [
  "uuid",
  "windows",
  "windows-collections",
+]
+
+[[package]]
+name = "beam-wake-task"
+version = "0.1.0"
+dependencies = [
+ "windows",
+ "windows-core",
 ]
 
 [[package]]

@@ -72,7 +72,11 @@ pub fn create(app: &AppHandle, mode: VisibilityMode) -> tauri::Result<()> {
             "vis-everyone" => set_visibility(app, VisibilityMode::Everyone),
             "vis-trusted" => set_visibility(app, VisibilityMode::TrustedOnly),
             "vis-off" => set_visibility(app, VisibilityMode::Off),
-            "quit" => app.exit(0),
+            "quit" => {
+                // In the Store package, a phone opening Beam starts it again.
+                crate::wake::arm();
+                app.exit(0)
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

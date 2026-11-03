@@ -11,6 +11,7 @@ mod sendto;
 mod settings;
 mod state;
 mod tray;
+mod wake;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,7 +30,11 @@ fn main() {
         // hands its arguments to the running app and exits.
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             stage_files_from_args(app, &argv);
-            show_main(app);
+            // A Bluetooth wake-up launches Beam with --minimized every few
+            // seconds while a phone is near; the running Beam ignores those.
+            if !argv.iter().any(|a| a == MINIMIZED_FLAG) {
+                show_main(app);
+            }
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -51,7 +56,15 @@ fn main() {
 
             let args: Vec<String> = std::env::args().collect();
             stage_files_from_args(app.handle(), &args);
-            if !args.iter().any(|a| a == MINIMIZED_FLAG) {
+            // Running now: nothing needs to wake Beam (see wake.rs).
+            wake::disarm();
+            if wake::is_packaged() && state.settings().start_with_windows {
+                // The package starts through its startup task, not a Run key.
+                if let Some(Err(e)) = wake::set_startup(true) {
+                    eprintln!("{e}");
+                }
+            }
+            if !args.iter().any(|a| a == MINIMIZED_FLAG) && !wake::started_at_sign_in() {
                 show_main(app.handle());
             }
             tauri::async_runtime::spawn(async move {
@@ -133,6 +146,9 @@ fn stage_files_from_args(app: &AppHandle, argv: &[String]) {
 }
 
 pub fn set_autostart(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    if let Some(result) = wake::set_startup(enabled) {
+        return result;
+    }
     let launcher = app.autolaunch();
     let result = if enabled {
         launcher.enable()

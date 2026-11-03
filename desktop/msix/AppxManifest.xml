@@ -46,6 +46,25 @@
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
+        <!-- After Quit, a phone opening Beam starts it again (wake.rs and
+             docs/STAGE3-SPIKE.md): Windows runs BeamWake.Task, which starts
+             Beam.exe with the "Wake" parameters, quietly in the tray. -->
+        <Extension Category="windows.backgroundTasks" EntryPoint="BeamWake.Task">
+          <BackgroundTasks>
+            <Task Type="bluetooth" />
+          </BackgroundTasks>
+        </Extension>
+        <desktop:Extension Category="windows.fullTrustProcess" Executable="Beam.exe">
+          <desktop:FullTrustProcess>
+            <desktop:ParameterGroup GroupId="Wake" Parameters="--minimized" />
+          </desktop:FullTrustProcess>
+        </desktop:Extension>
+        <!-- Settings → Start with Windows; off until Beam turns it on. -->
+        <desktop:Extension Category="windows.startupTask" Executable="Beam.exe" EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask TaskId="BeamStartup" Enabled="false" DisplayName="Beam" />
+        </desktop:Extension>
+      </Extensions>
     </Application>
   </Applications>
 
@@ -61,6 +80,13 @@
   </Capabilities>
 
   <Extensions>
+    <!-- The Bluetooth wake-up task (desktop/wake-task). -->
+    <Extension Category="windows.activatableClass.inProcessServer">
+      <InProcessServer>
+        <Path>beam_wake_task.dll</Path>
+        <ActivatableClass ActivatableClassId="BeamWake.Task" ThreadingModel="both" />
+      </InProcessServer>
+    </Extension>
     <!-- Phones connect in over the network, including over a phone's
          hotspot, which Windows treats as a public network. -->
     <desktop2:Extension Category="windows.firewallRules">
