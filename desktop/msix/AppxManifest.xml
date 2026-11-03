@@ -20,7 +20,7 @@
     ProcessorArchitecture="x64" />
 
   <Properties>
-    <DisplayName>Beam</DisplayName>
+    <DisplayName>Beam Share</DisplayName>
     <PublisherDisplayName>{{PUBLISHER_DISPLAY_NAME}}</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
     <!-- Beam writes its Send To shortcut and settings like any desktop app;
@@ -41,7 +41,7 @@
   <Applications>
     <Application Id="Beam" Executable="Beam.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="Beam"
+        DisplayName="Beam Share"
         Description="Send files between your phone and PC, even with no Wi-Fi network in common."
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
@@ -62,7 +62,7 @@
         </desktop:Extension>
         <!-- Settings → Start with Windows; off until Beam turns it on. -->
         <desktop:Extension Category="windows.startupTask" Executable="Beam.exe" EntryPoint="Windows.FullTrustApplication">
-          <desktop:StartupTask TaskId="BeamStartup" Enabled="false" DisplayName="Beam" />
+          <desktop:StartupTask TaskId="BeamStartup" Enabled="false" DisplayName="Beam Share" />
         </desktop:Extension>
       </Extensions>
     </Application>

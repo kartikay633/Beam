@@ -38,6 +38,13 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /** Everything the UI and the service show. */
+/**
+ * Whether [folders] (a PC's save-to list) still has the folder [chosen] is
+ * in: "documents/Trip" only needs "documents", since a new subfolder isn't
+ * listed until the PC has made it.
+ */
+internal fun offersRoot(folders: List<String>, chosen: String) = chosen.substringBefore('/') in folders
+
 data class BeamState(
     val running: Boolean = false,
     val starting: Boolean = false,
@@ -234,7 +241,7 @@ class BeamRepository(
             try {
                 checkNotNull(current) { "Beam isn't running" }
                 val key = saveKey(device.name)
-                val folder = _state.value.saveTo[key]?.takeIf { it in _state.value.saveFolders[key].orEmpty() }
+                val folder = _state.value.saveTo[key]?.takeIf { offersRoot(_state.value.saveFolders[key].orEmpty(), it) }
                 current.setSaveTo(id, folder)
                 if (device.link == NearbyLink.BLUETOOTH) {
                     sendOffline(current, id, device, files, handOver)
@@ -483,9 +490,9 @@ class BeamRepository(
                 ?: return
             val key = saveKey(name)
             settings.setSaveFolders(key, folders)
-            if (settings.saveTo(key)?.let { it !in folders } == true) settings.setSaveTo(key, null)
+            if (settings.saveTo(key)?.let { !offersRoot(folders, it) } == true) settings.setSaveTo(key, null)
             _state.update { it.copy(saveFolders = it.saveFolders + (key to folders)).let { st ->
-                if (st.saveTo[key]?.let { f -> f !in folders } == true) st.copy(saveTo = st.saveTo - key) else st
+                if (st.saveTo[key]?.let { f -> !offersRoot(folders, f) } == true) st.copy(saveTo = st.saveTo - key) else st
             } }
         }
 

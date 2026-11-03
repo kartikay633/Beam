@@ -58,25 +58,94 @@ impl SaveFolders {
         *self.0.write().unwrap_or_else(|e| e.into_inner()) = folders;
     }
 
-    /// The folder for `id`, if it's one of ours.
+    /// The folder for `id`, if it's one of ours. `id` may also name a
+    /// subfolder inside one of them, `"<id>/<name>"` (one plain folder name;
+    /// it's created if missing), so a phone can pick Documents → Projects or
+    /// make a new folder. Anything else — `..`, separators, names Windows
+    /// would change — isn't ours, and the caller uses its default folder.
     pub fn resolve(&self, id: &str) -> Option<PathBuf> {
-        self.0
+        let (root, sub) = match id.split_once('/') {
+            Some((root, sub)) => (root, Some(sub)),
+            None => (id, None),
+        };
+        let dir = self
+            .0
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .find(|(known, _)| known == id)
-            .map(|(_, dir)| dir.clone())
+            .find(|(known, _)| known == root)
+            .map(|(_, dir)| dir.clone())?;
+        match sub {
+            None => Some(dir),
+            Some(sub) if is_plain_folder_name(sub) => Some(dir.join(sub)),
+            Some(_) => None,
+        }
     }
 
-    /// HELLO capabilities announcing these folders.
+    /// HELLO capabilities announcing these folders, each followed by up to
+    /// [`LISTED_SUBFOLDERS`] of its subfolders (most recently changed
+    /// first), as `save-to:<id>/<name>`.
     pub fn capabilities(&self) -> Vec<String> {
-        self.0
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .map(|(id, _)| format!("{}{id}", crate::messages::SAVE_TO_PREFIX))
-            .collect()
+        let prefix = crate::messages::SAVE_TO_PREFIX;
+        let mut capabilities = Vec::new();
+        for (id, dir) in self.0.read().unwrap_or_else(|e| e.into_inner()).iter() {
+            capabilities.push(format!("{prefix}{id}"));
+            for name in subfolders(dir) {
+                capabilities.push(format!("{prefix}{id}/{name}"));
+            }
+        }
+        capabilities
     }
+}
+
+/// How many subfolders of each save folder a phone is shown.
+pub const LISTED_SUBFOLDERS: usize = 20;
+
+/// One folder name that is safe to join to a save folder exactly as given.
+fn is_plain_folder_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.starts_with('.')
+        && crate::sanitize::sanitize_file_name(name) == name
+}
+
+/// The visible, plainly named subfolders of `dir`, newest first.
+fn subfolders(dir: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(std::time::SystemTime, String)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let meta = entry.metadata().ok()?;
+            if !meta.is_dir() || is_hidden(&meta) {
+                return None;
+            }
+            let name = entry.file_name().into_string().ok()?;
+            is_plain_folder_name(&name)
+                .then(|| (meta.modified().unwrap_or(std::time::UNIX_EPOCH), name))
+        })
+        .collect();
+    found.sort_by_key(|a| std::cmp::Reverse(a.0));
+    found
+        .into_iter()
+        .take(LISTED_SUBFOLDERS)
+        .map(|(_, name)| name)
+        .collect()
+}
+
+#[cfg(windows)]
+fn is_hidden(meta: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const HIDDEN: u32 = 0x2;
+    const SYSTEM: u32 = 0x4;
+    meta.file_attributes() & (HIDDEN | SYSTEM) != 0
+}
+
+#[cfg(not(windows))]
+fn is_hidden(_meta: &std::fs::Metadata) -> bool {
+    false
 }
 
 #[derive(Debug, Clone)]

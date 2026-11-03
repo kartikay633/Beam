@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "beam-desktop"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "beam-core",
  "dirs 7.0.0",

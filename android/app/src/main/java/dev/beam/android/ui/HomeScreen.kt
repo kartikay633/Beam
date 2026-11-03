@@ -2,6 +2,7 @@ package dev.beam.android.ui
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,11 +23,11 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -246,38 +247,122 @@ private fun visibilityLabel(state: BeamState): String {
 }
 
 /** "Save to  Desktop ▾": which folder on the PC the files land in. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SaveToChoice(folders: List<String>, chosen: String?, onChoose: (String?) -> Unit) {
     var open by remember { mutableStateOf(false) }
+    var newIn by remember { mutableStateOf<String?>(null) }
     Row(
         Modifier.fillMaxWidth().padding(start = 70.dp, end = 16.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text("Save to", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Box {
-            TextButton(onClick = { open = true }) {
-                Text(folderLabel(chosen), fontSize = 13.sp)
-                Icon(Icons.Filled.ArrowDropDown, null)
-            }
-            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                (listOf<String?>(null) + folders).forEach { folder ->
-                    DropdownMenuItem(
-                        text = { Text(folderLabel(folder)) },
-                        onClick = {
+        TextButton(onClick = { open = true }) {
+            Text(folderLabel(chosen), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Icon(Icons.Filled.ArrowDropDown, null)
+        }
+    }
+    if (open) {
+        val pick = { folder: String? ->
+            open = false
+            onChoose(folder)
+        }
+        ModalBottomSheet(onDismissRequest = { open = false }) {
+            LazyColumn(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+                item { SheetRow(folderLabel(null), chosen == null, indent = false) { pick(null) } }
+                saveFolderTree(folders).forEach { (root, subs) ->
+                    item { SheetRow(folderLabel(root), chosen == root, indent = false) { pick(root) } }
+                    items(subs) { sub -> SheetRow(sub.substringAfter('/'), chosen == sub, indent = true) { pick(sub) } }
+                    item {
+                        SheetRow("New folder…", selected = false, indent = true, accent = true) {
                             open = false
-                            onChoose(folder)
-                        },
-                        trailingIcon = { if (folder == chosen) Icon(Icons.Filled.Check, "Selected") },
-                    )
+                            newIn = root
+                        }
+                    }
                 }
             }
         }
     }
+    newIn?.let { root ->
+        NewFolderDialog(
+            inFolder = folderLabel(root),
+            onDismiss = { newIn = null },
+            onCreate = { name ->
+                newIn = null
+                onChoose("$root/$name")
+            },
+        )
+    }
+}
+
+@Composable
+private fun SheetRow(text: String, selected: Boolean, indent: Boolean, accent: Boolean = false, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).heightIn(min = 48.dp)
+            .padding(start = if (indent) 44.dp else 20.dp, end = 20.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text,
+            fontSize = 15.sp,
+            fontWeight = if (indent) FontWeight.Normal else FontWeight.Medium,
+            color = if (accent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        if (selected) Icon(Icons.Filled.Check, "Selected", tint = MaterialTheme.colorScheme.primary)
+    }
+}
+
+@Composable
+private fun NewFolderDialog(inFolder: String, onDismiss: () -> Unit, onCreate: (String) -> Unit) {
+    var name by remember { mutableStateOf("") }
+    val problem = folderNameProblem(name)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("New folder in $inFolder") },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                singleLine = true,
+                label = { Text("Folder name") },
+                isError = name.isNotEmpty() && problem != null,
+                supportingText = { if (name.isNotEmpty() && problem != null) Text(problem) },
+            )
+        },
+        confirmButton = { TextButton(onClick = { onCreate(name.trim()) }, enabled = problem == null) { Text("Use folder") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/** A PC's folders with their listed subfolders: ("documents", ["documents/Projects", …]). */
+internal fun saveFolderTree(folders: List<String>): List<Pair<String, List<String>>> {
+    val roots = folders.filter { '/' !in it }
+    return roots.map { root -> root to folders.filter { it.startsWith("$root/") } }
+}
+
+/** Characters Windows doesn't allow in a folder name. */
+private const val FORBIDDEN = "<>:\"/\\|?*"
+
+/** Why [raw] can't be a new folder on the PC, or null if it can. The PC checks again. */
+internal fun folderNameProblem(raw: String): String? {
+    val name = raw.trim()
+    return when {
+        name.isEmpty() -> "Type a name"
+        name.length > 100 -> "Use a shorter name"
+        name.startsWith('.') || name.endsWith('.') -> "Can't start or end with a dot"
+        name.any { it in FORBIDDEN || it.code < 32 } -> "Can't contain any of $FORBIDDEN"
+        else -> null
+    }
 }
 
 /** A PC folder id as people say it; null is the PC's own Beam folder. */
-internal fun folderLabel(id: String?) = when {
+internal fun folderLabel(id: String?): String = when {
     id == null -> "Beam folder"
+    // A subfolder: "documents/Projects" → "Documents › Projects".
+    '/' in id -> "${folderLabel(id.substringBefore('/'))} › ${id.substringAfter('/')}"
     // A folder the PC's owner pinned: "pin:Projects".
     id.startsWith("pin:") -> id.removePrefix("pin:").ifBlank { "Pinned folder" }
     id == "downloads" -> "Downloads"
