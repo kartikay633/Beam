@@ -86,7 +86,14 @@ fun HomeScreen(
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.padding(start = 10.dp).weight(1f),
                     )
-                    IconButton(onClick = onPair) { Icon(Icons.Filled.QrCodeScanner, "Pair with a laptop") }
+                    if (state.trusted.isEmpty()) {
+                        TextButton(onClick = onPair) {
+                            Icon(Icons.Filled.QrCodeScanner, null, modifier = Modifier.padding(end = 6.dp))
+                            Text("Scan code")
+                        }
+                    } else {
+                        IconButton(onClick = onPair) { Icon(Icons.Filled.QrCodeScanner, "Pair with a computer") }
+                    }
                     IconButton(onClick = onSettings) { Icon(Icons.Filled.Tune, "Settings") }
                 }
             }
@@ -96,6 +103,9 @@ fun HomeScreen(
                 }
             }
             item { notificationBanner() }
+            if (state.trusted.isEmpty()) {
+                item { PairHint(onPair) }
+            }
             state.error?.let { error ->
                 item { Banner("Beam couldn't start: $error", action = "Retry", error = true, onAction = onRetry) }
             }
@@ -371,4 +381,29 @@ internal fun folderLabel(id: String?): String = when {
     id == "pictures" -> "Pictures"
     id == "videos" -> "Videos"
     else -> id.replaceFirstChar { it.uppercase() }
+}
+
+/** Shown until a computer is paired: the three steps, and the button to start. */
+@Composable
+private fun PairHint(onPair: () -> Unit) {
+    ListCard(Modifier.padding(top = 14.dp)) {
+        Row(
+            Modifier.fillMaxWidth().padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            IconTile(Icons.Filled.QrCodeScanner)
+            Column(Modifier.weight(1f)) {
+                Text("Pair your computer", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "1. On your computer, open Beam and click Your devices. A square code appears.\n" +
+                        "2. Tap Scan code and point your camera at it.",
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+                RowButton("Scan code", onPair)
+            }
+        }
+    }
 }

@@ -23,8 +23,8 @@ android {
         applicationId = "dev.beam.android"
         minSdk = 29
         targetSdk = 37
-        versionCode = 11
-        versionName = "0.2.0"
+        versionCode = 12
+        versionName = "0.2.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Only the ABIs libbeam_core_ffi.so is built for (ML Kit ships more).
         ndk { abiFilters += abis }
