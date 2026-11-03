@@ -49,6 +49,17 @@ enum class Screen(val title: String) {
 
 @Composable
 fun BeamScreen(vm: BeamViewModel, onRetry: () -> Unit) {
+    val settings = (LocalContext.current.applicationContext as dev.beam.android.BeamApp).settings
+    var onboarded by rememberSaveable { mutableStateOf(settings.onboarded) }
+    if (!onboarded) {
+        SetupScreen {
+            settings.onboarded = true
+            onboarded = true
+            vm.refreshRadio()
+        }
+        return
+    }
+    SwitchesOnWhenOpened(vm::refreshRadio)
     val state by vm.state.collectAsStateWithLifecycle()
     val staged by vm.staged.collectAsStateWithLifecycle()
     var screen by rememberSaveable { mutableStateOf(Screen.HOME) }

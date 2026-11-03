@@ -33,7 +33,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        BeamService.start(this)
+        BeamService.appShown(this)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // A rotation stops and restarts the activity: that isn't leaving.
+        if (!isChangingConfigurations) BeamService.appHidden()
     }
 
     override fun onNewIntent(intent: Intent) {

@@ -15,13 +15,17 @@ import dev.beam.android.BeamApp
 import dev.beam.android.data.BeamRepository
 import dev.beam.android.data.BeamState
 import dev.beam.android.data.DiscoveryChoice
+import dev.beam.android.radio.RadioSwitches
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * Keeps Beam receiving while the app is in the background (foreground
- * service, type `connectedDevice`), shows progress with Cancel, and holds a
- * Wi-Fi lock and a partial wake lock only while a transfer is moving.
+ * Runs Beam while the app is open, and keeps a transfer going after you
+ * leave it (foreground service, type `connectedDevice`), with progress and
+ * Cancel. Once you've left and nothing is moving, it stops, so Beam isn't
+ * always in the notification bar, and offers to switch off the radios Beam
+ * switched on (RadioSwitches). Holds a Wi-Fi lock and a partial wake lock
+ * only while a transfer is moving.
  */
 class BeamService : LifecycleService() {
     private val app get() = application as BeamApp
@@ -58,16 +62,44 @@ class BeamService : LifecycleService() {
                 render(repository.state.value)
             }
         }
+        lifecycleScope.launch {
+            // Stop a while after Beam left the screen, once nothing is
+            // moving or waiting for an answer. The delay covers trips to
+            // the file picker or the share sheet.
+            while (true) {
+                delay(5_000)
+                val state = repository.state.value
+                val idle = state.busy.isEmpty() && state.offers.isEmpty()
+                if (!appVisible && idle && System.currentTimeMillis() - hiddenSinceMs >= IDLE_STOP_MS) stopBeam()
+            }
+        }
+    }
+
+    /** Swiped away from recent apps: stop now, unless a transfer is moving. */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        appVisible = false
+        if (repository.state.value.busy.isEmpty()) stopBeam()
+    }
+
+    private var stopping = false
+
+    private fun stopBeam() {
+        if (stopping) return
+        stopping = true
+        lifecycleScope.launch {
+            repository.stop()
+            Notifications.offerSwitchingOff(this@BeamService, RadioSwitches.takeTurnedOn(this@BeamService))
+            ServiceCompat.stopForeground(this@BeamService, ServiceCompat.STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
         val id = intent?.getStringExtra(EXTRA_ID)
         when (intent?.action) {
-            ACTION_STOP -> lifecycleScope.launch {
-                repository.stop()
-                stopSelf()
-            }
+            ACTION_STOP -> stopBeam()
             ACTION_CANCEL -> id?.let(repository::cancel)
             ACTION_ACCEPT -> id?.let { repository.respond(it, accept = true, trust = false) }
             ACTION_DECLINE -> id?.let { repository.respond(it, accept = false, trust = false) }
@@ -151,9 +183,22 @@ class BeamService : LifecycleService() {
         private const val WAKE_LOCK_LIMIT_MS = 6 * 60 * 60 * 1000L
         private const val RENDER_INTERVAL_MS = 500L
 
-        /** Starts receiving; call while the app is in the foreground. */
-        fun start(context: Context) {
+        /** How long after Beam leaves the screen it stops, when idle. */
+        private const val IDLE_STOP_MS = 2 * 60 * 1000L
+
+        @Volatile private var appVisible = false
+        @Volatile private var hiddenSinceMs = 0L
+
+        /** Beam is on screen: start (or keep) receiving. */
+        fun appShown(context: Context) {
+            appVisible = true
             ContextCompat.startForegroundService(context, Intent(context, BeamService::class.java))
+        }
+
+        /** Beam left the screen: the service stops later, once idle. */
+        fun appHidden() {
+            appVisible = false
+            hiddenSinceMs = System.currentTimeMillis()
         }
     }
 }

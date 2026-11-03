@@ -16,6 +16,9 @@ interface SettingsStore {
     var streams: Int
     var discovery: DiscoveryChoice
 
+    /** The first-launch setup screen was shown (and answered). */
+    var onboarded: Boolean
+
     /** Folders a PC (by [saveKey]) lets us pick, as it last told us. */
     fun saveFolders(device: String): List<String>
     fun setSaveFolders(device: String, folders: List<String>)
@@ -33,6 +36,7 @@ class MemorySettings(
     override var visibility: Visibility = Visibility.EVERYONE,
     override var streams: Int = 4,
     override var discovery: DiscoveryChoice = DiscoveryChoice.ANDROID_NSD,
+    override var onboarded: Boolean = true,
 ) : SettingsStore {
     private val folders = mutableMapOf<String, List<String>>()
     private val chosen = mutableMapOf<String, String>()
@@ -69,6 +73,10 @@ class PrefsSettings(context: Context) : SettingsStore {
         get() = prefs.getString("discovery", null)?.let { runCatching { DiscoveryChoice.valueOf(it) }.getOrNull() }
             ?: DiscoveryChoice.ANDROID_NSD
         set(value) = prefs.edit { putString("discovery", value.name) }
+
+    override var onboarded: Boolean
+        get() = prefs.getBoolean("onboarded", false)
+        set(value) = prefs.edit { putBoolean("onboarded", value) }
 
     override fun saveFolders(device: String): List<String> =
         prefs.getString("save_folders:$device", null)?.split(',')?.filter { it.isNotEmpty() }.orEmpty()

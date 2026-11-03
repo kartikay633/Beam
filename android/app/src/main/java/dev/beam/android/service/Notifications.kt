@@ -130,5 +130,41 @@ object Notifications {
         .setAutoCancel(true)
         .build()
 
+    /**
+     * "Beam turned on Bluetooth and Location", with a button per switch.
+     * Android doesn't let apps turn these off, so each button opens the
+     * place where it's one tap.
+     */
+    @android.annotation.SuppressLint("MissingPermission") // Without the permission it just doesn't show.
+    fun offerSwitchingOff(context: Context, switches: List<dev.beam.android.radio.RadioSwitch>) {
+        if (switches.isEmpty()) return
+        val manager = androidx.core.app.NotificationManagerCompat.from(context)
+        if (!manager.areNotificationsEnabled()) return
+        val names = switches.map { it.label }
+        val list = if (names.size == 1) names[0] else names.dropLast(1).joinToString(", ") + " and " + names.last()
+        val builder = NotificationCompat.Builder(context, CHANNEL_DONE)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("Beam turned on $list")
+            .setContentText("Turn ${if (names.size == 1) "it" else "them"} off if you don't need ${if (names.size == 1) "it" else "them"}.")
+            .setAutoCancel(true)
+        switches.forEachIndexed { i, switch ->
+            val action = when (switch) {
+                dev.beam.android.radio.RadioSwitch.BLUETOOTH -> android.provider.Settings.ACTION_BLUETOOTH_SETTINGS
+                dev.beam.android.radio.RadioSwitch.WIFI -> android.provider.Settings.Panel.ACTION_WIFI
+                dev.beam.android.radio.RadioSwitch.LOCATION -> android.provider.Settings.ACTION_LOCATION_SOURCE_SETTINGS
+            }
+            val open = PendingIntent.getActivity(
+                context,
+                100 + i,
+                Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+            builder.addAction(0, "Turn off ${switch.label}", open)
+        }
+        manager.notify(ID_SWITCHES, builder.build())
+    }
+
+    const val ID_SWITCHES = 2
+
     fun files(count: Int) = if (count == 1) "1 file" else "$count files"
 }
