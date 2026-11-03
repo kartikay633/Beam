@@ -43,10 +43,48 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a resumed transfer waits for the old session to wind down.
 const TAKEOVER_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Folders a trusted sender may choose to save into, by id (for example
+/// `"desktop"`). Shared, so the app can change them while receiving. The
+/// default folder is always allowed and needs no entry.
+#[derive(Debug, Clone, Default)]
+pub struct SaveFolders(Arc<std::sync::RwLock<Vec<(String, PathBuf)>>>);
+
+impl SaveFolders {
+    pub fn new(folders: Vec<(String, PathBuf)>) -> Self {
+        SaveFolders(Arc::new(std::sync::RwLock::new(folders)))
+    }
+
+    pub fn set(&self, folders: Vec<(String, PathBuf)>) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = folders;
+    }
+
+    /// The folder for `id`, if it's one of ours.
+    pub fn resolve(&self, id: &str) -> Option<PathBuf> {
+        self.0
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|(known, _)| known == id)
+            .map(|(_, dir)| dir.clone())
+    }
+
+    /// HELLO capabilities announcing these folders.
+    pub fn capabilities(&self) -> Vec<String> {
+        self.0
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(id, _)| format!("{}{id}", crate::messages::SAVE_TO_PREFIX))
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ReceiverConfig {
     pub device: LocalDevice,
     pub download_dir: PathBuf,
+    /// Other folders a trusted sender may pick (protocol 1.1).
+    pub save_folders: SaveFolders,
     pub trust: TrustStore,
     /// Who may send right now; checked for every offer.
     pub visibility: Visibility,
@@ -61,6 +99,9 @@ pub struct IncomingOffer {
     pub from: PeerInfo,
     pub files: Vec<FileEntry>,
     pub total_size: u64,
+    /// Where the files will be saved: the default folder, or the one a
+    /// trusted sender picked.
+    pub folder: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,13 +1,17 @@
 # Beam
 
-**AirDrop for Android ↔ Windows:** fast, end-to-end encrypted file and clipboard
+**AirDrop for Android ↔ Windows:** fast, end-to-end encrypted file
 sharing that works even with no shared Wi-Fi network and no internet.
 
-> **Status: in development.** Phone ↔ laptop transfers work on the same
-> Wi-Fi network (the Android app, the Windows app and the CLI). Transfers
-> with **no shared network** (Bluetooth to find each other, the phone's
-> private hotspot to transfer) are built and being tested on real devices.
-> Follow progress in [docs/SPEC.md](docs/SPEC.md).
+> **Status: Windows 0.1.7 / Android 0.1.5 local repair builds.** Windows
+> uses reachable LAN or laptop-hosted Wi-Fi Direct and preserves the PC's
+> existing Wi-Fi by disabling automatic phone-hotspot joining. Turn Android
+> Location on for Direct discovery. This pass repairs file-selection races,
+> cancellation cleanup, resume, settings and desktop error handling without
+> a connected phone. Earlier 0.1.6/0.1.4 physical tests passed both directions
+> with matching hashes (11–25 seconds fresh, about 5 seconds repeat setup).
+> These new packages still need physical acceptance and production signing;
+> they are not published. See [the current release checks](docs/RELEASE-0.1.7.md).
 
 ## Download the latest build
 
@@ -21,9 +25,11 @@ Both are rebuilt from `main` on every push that passes CI.
 ## What makes it different
 
 - **No shared network needed.** On a train or anywhere without Wi-Fi in
-  common: Beam finds the other device over Bluetooth LE, then the phone
-  opens a private Wi-Fi link just for the transfer. There's no pairing in
-  Bluetooth settings and nothing to join by hand.
+  common: Beam finds the other device over Bluetooth LE, then negotiates
+  a private Wi-Fi link for file data. Wi-Fi and Bluetooth must both be on;
+  enable Android Location for Direct discovery. Internet and USB tethering
+  are unnecessary. The operating system may
+  ask to approve a Wi-Fi Direct connection.
 - **Two taps from the share sheet.** Your trusted laptop appears directly
   in Android's share sheet: share, tap the laptop, done.
 - **End-to-end encrypted and verified.** Noise XX with device keys, a

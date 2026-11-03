@@ -303,3 +303,53 @@ Bugs that took more than an hour to fix. For each one: symptom, root cause, fix.
   at the receiver's resume wait, which has no timeout for a sender that
   never comes back.
 - **Phase:** 8
+
+## 2026-10-31 — Link setup needs ownership across cancellation
+
+- **Evidence:** Device logs showed Windows pairing failures and Android
+  waiting for a group-owner flag. A deterministic FFI test also showed
+  that dropping an exported send future left its spawned sender alive:
+  the receiver could accept later and still receive the file.
+- **Fixes:** Create Windows Wi-Fi Direct operations on the UI thread;
+  preserve hotspot fallback after Direct failure; probe TCP reachability
+  rather than matching address prefixes. Give acquired links an
+  idempotent lease, reject late unsolicited replies, and track in-flight
+  calls independently from the cooldown.
+- **Cancellation:** Register Android setup jobs before they start, clean
+  unsent files even if the coroutine never runs, and forward cancellation
+  to the native node as well. FFI send tasks now abort when their caller
+  disappears, and remove their cancellation registration on every exit.
+- **Descriptors:** Resolving LAN addresses must precede transferring file
+  ownership. Retrying a consumed raw descriptor can refer to an already
+  closed or reused descriptor.
+- **Proof boundary:** Negotiation policy, cleanup, descriptor submission,
+  QR identity checks and cancellation have regressions. Physical driver
+  interoperability remains a separate release check for this candidate.
+
+## 2026-11-03 — Record topology alongside hardware acceptance
+
+- A successful Direct network may be rediscovered through mDNS. Discovery
+  as LAN does not remove the need to keep the underlying P2P lease alive.
+- A Bluetooth-only cold-test filter can time out when the same peer is
+  already known on a reachable LAN. Report an unmet test precondition,
+  and distinguish it from an actual transfer failure.
+- Record the active interfaces/SSID and tethering state at each test. A
+  user can legitimately change networks during a long session. Here the
+  PC moved to the phone's personal hotspot when college Wi-Fi closed;
+  preserve that internet connection and defer independent-network tests.
+- Do not infer a release-only defect from one automation failure. Compare
+  normal app behavior under the same network conditions. The installed
+  release subsequently completed its Bluetooth/LAN send normally.
+
+### Offline audit follow-up, 2026-11-03
+
+- A complete resume bitmap is not final integrity proof. The sender must still
+  be able to service a repair request if the receiver's whole-file hash fails.
+- Resource-bearing coroutine results need ownership outside `withContext`:
+  prompt cancellation can discard the returned value after descriptors opened.
+- Delayed share requests must retain their own selection, rather than reading
+  mutable global staging when a device finally appears.
+- Register event listeners before fetching an initial snapshot. Otherwise a
+  change during asynchronous registration can be missed until another event.
+- Disconnected-device validation can reproduce file/race/protocol failures,
+  but must not be reported as physical Wi-Fi Direct acceptance.

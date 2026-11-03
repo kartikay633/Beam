@@ -14,8 +14,8 @@ use beam_core::discovery::first_reachable;
 use beam_core::{
     send_to, Advertiser, BoxFuture, Browser, Decision, DeviceId, DeviceType, DiscoveryEvent,
     IncomingOffer, LocalDevice, NearbyDevice, PairingWindow, Progress, ReceiveHandler,
-    ReceiveOutcome, Receiver, ReceiverConfig, ReceiverHandle, SendEvent, SendOptions, SendOutcome,
-    TransferError, TrustStore, TrustedDevice, Visibility, VisibilityMode,
+    ReceiveOutcome, Receiver, ReceiverConfig, ReceiverHandle, SaveFolders, SendEvent, SendOptions,
+    SendOutcome, TransferError, TrustStore, TrustedDevice, Visibility, VisibilityMode,
 };
 use serde::Serialize;
 use tauri::async_runtime::JoinHandle;
@@ -43,6 +43,10 @@ pub struct AppState {
     /// The pairing code on the Pair page, if it's open.
     pub pairing: PairingWindow,
     settings: Mutex<Settings>,
+    /// Fixed for this receiver lifetime; saved folder changes apply on restart.
+    receive_dir: PathBuf,
+    /// The other folders trusted devices may save into; follows settings.
+    save_folders: SaveFolders,
     ui: Mutex<UiState>,
     receiver: Mutex<Option<RunningReceiver>>,
     advertiser: Mutex<Option<Advertiser>>,
@@ -100,6 +104,7 @@ pub struct Snapshot {
     pub trusted: Vec<TrustedView>,
     pub staged: Vec<StagedFile>,
     pub settings: Settings,
+    pub receive_dir: String,
     /// `None` when Bluetooth works; otherwise why it doesn't.
     pub bluetooth_problem: Option<String>,
     pub notice: Option<String>,
@@ -288,6 +293,8 @@ impl AppState {
             trust,
             visibility: Visibility::new(mode),
             pairing: PairingWindow::default(),
+            receive_dir: settings.download_dir.clone(),
+            save_folders: SaveFolders::new(settings.save_folder_paths()),
             settings: Mutex::new(settings),
             config_dir,
             ui: Mutex::default(),
@@ -324,6 +331,23 @@ impl AppState {
             // Forget phones that went quiet.
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
+                if let Some(radio) = state.radio() {
+                    let problem = radio.refresh().err();
+                    let changed = *lock(&state.radio_problem) != problem;
+                    *lock(&state.radio_problem) = problem;
+                    if changed {
+                        state.emit();
+                    }
+                } else {
+                    match Radio::start(Arc::downgrade(&state)).await {
+                        Ok(radio) => {
+                            *lock(&state.radio) = Some(radio);
+                            *lock(&state.radio_problem) = None;
+                            state.emit();
+                        }
+                        Err(problem) => *lock(&state.radio_problem) = Some(problem),
+                    }
+                }
                 let removed = {
                     let mut ui = state.ui();
                     let before = ui.ble.len();
@@ -378,6 +402,7 @@ impl AppState {
 
     /// Something went wrong that the user should hear about.
     pub fn show_error(&self, message: String) {
+        crate::offline::log(format!("shown: {message}"));
         self.ui().notice = Some(message);
         self.emit();
     }
@@ -389,10 +414,18 @@ impl AppState {
 
     /// Whether a received transfer is under way.
     pub fn is_receiving(&self) -> bool {
+        self.ui().transfers.iter().any(|t| {
+            t.view.direction == "receive"
+                && matches!(t.view.state, TransferState::Waiting | TransferState::Active)
+        })
+    }
+
+    /// Active sends may also use an address on a retained Direct interface.
+    pub fn is_transferring(&self) -> bool {
         self.ui()
             .transfers
             .iter()
-            .any(|t| t.view.direction == "receive" && !t.view.state.is_finished())
+            .any(|t| matches!(t.view.state, TransferState::Waiting | TransferState::Active))
     }
 
     fn radio(&self) -> Option<Arc<Radio>> {
@@ -402,7 +435,8 @@ impl AppState {
     async fn start_receiver(self: &Arc<Self>) -> Result<u16, String> {
         let config = ReceiverConfig {
             device: self.device.clone(),
-            download_dir: self.settings().download_dir,
+            download_dir: self.download_dir(),
+            save_folders: self.save_folders.clone(),
             trust: self.trust.clone(),
             visibility: self.visibility.clone(),
             pairing: self.pairing.clone(),
@@ -462,19 +496,14 @@ impl AppState {
         tauri::async_runtime::spawn(async move {
             let mut changes = state.visibility.subscribe();
             loop {
-                let expiry = state.visibility.everyone_until();
+                let deadline = beam_core::discovery::next_announcement_change(&state.visibility);
                 tokio::select! {
                     _ = changes.changed() => {
                         if let Some(radio) = state.radio() {
                             radio.update_advertisement();
                         }
                     }
-                    _ = async {
-                        match expiry {
-                            Some(until) => tokio::time::sleep_until(until).await,
-                            None => std::future::pending().await,
-                        }
-                    } => {
+                    _ = tokio::time::sleep_until(deadline) => {
                         let _ = state.visibility.mode();
                         if let Some(radio) = state.radio() {
                             radio.update_advertisement();
@@ -579,6 +608,7 @@ impl AppState {
                 })
                 .collect(),
             settings: self.settings(),
+            receive_dir: self.download_dir().display().to_string(),
             bluetooth_problem: lock(&self.radio_problem).clone(),
             notice: ui.notice.clone(),
         }
@@ -706,7 +736,16 @@ impl AppState {
     ) {
         // Kept until the send ends: it holds any hotspot joined for it.
         let mut _link: Option<OfflineLink> = None;
-        let (addr, expect_device) = match self.resolve_target(&id, &target).await {
+        let mut setup_cancel = cancel.clone();
+        let resolved = tokio::select! {
+            biased;
+            _ = setup_cancel.wait_for(|cancelled| *cancelled) => {
+                self.finish_transfer(&id, TransferState::Cancelled, None, None);
+                return;
+            }
+            result = self.resolve_target(&id, &target) => result,
+        };
+        let (addr, expect_device) = match resolved {
             Ok(Resolved::Address(addr, expect)) => (addr, expect),
             Ok(Resolved::Offline(link)) => {
                 let found = (link.addr, link.expect);
@@ -992,28 +1031,75 @@ impl AppState {
 
     pub async fn update_settings(self: &Arc<Self>, new: Settings) -> Result<(), String> {
         let new = new.sanitized();
-        let old = self.settings();
-        new.save(&self.config_dir.join("settings.json"))
-            .map_err(|e| format!("could not save settings: {e}"))?;
-        *lock(&self.settings) = new.clone();
-
-        if new.download_dir != old.download_dir {
-            // Running transfers keep their folder; new ones use the new one.
-            self.start_receiver().await?;
-        }
-        if new.send_to_shortcut != old.send_to_shortcut {
-            crate::sendto::set_installed(new.send_to_shortcut)?;
-        }
-        if new.start_with_windows != old.start_with_windows {
-            crate::set_autostart(&self.app, new.start_with_windows)?;
+        // Name and download folder apply on restart. Replacing the receiver
+        // here changes its port without replacing the mDNS advertisement and
+        // loses the active session routes/cancellation handles.
+        {
+            let mut current = lock(&self.settings);
+            new.apply(
+                &current,
+                &self.config_dir.join("settings.json"),
+                crate::sendto::set_installed,
+                |on| crate::set_autostart(&self.app, on),
+            )?;
+            self.save_folders.set(new.save_folder_paths());
+            *current = new;
         }
         self.emit();
         Ok(())
     }
 
-    pub fn download_dir(&self) -> PathBuf {
-        self.settings().download_dir
+    /// "Saved 3 files from POCO X4 Pro 5G", when Beam's window isn't open to
+    /// show it: files from a trusted device arrive without any prompt.
+    fn notify_saved(&self, id: &str) {
+        use tauri_plugin_notification::NotificationExt;
+        let window_open = self
+            .app
+            .get_webview_window("main")
+            .and_then(|w| w.is_visible().ok())
+            .unwrap_or(false);
+        if window_open {
+            return;
+        }
+        let Some(view) = self
+            .ui()
+            .transfers
+            .iter()
+            .find(|t| t.view.id == id)
+            .map(|t| t.view.clone())
+        else {
+            return;
+        };
+        let (title, body) = saved_message(&view);
+        if let Err(e) = self
+            .app
+            .notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .show()
+        {
+            eprintln!("notification: {e}");
+        }
     }
+
+    pub fn download_dir(&self) -> PathBuf {
+        self.receive_dir.clone()
+    }
+}
+
+/// The title and text of a "files saved" notification.
+fn saved_message(view: &TransferView) -> (String, String) {
+    let title = match view.file_count {
+        1 => format!("Saved from {}", view.peer_name),
+        n => format!("Saved {n} files from {}", view.peer_name),
+    };
+    let folder = view.folder.as_deref().unwrap_or("your Beam folder");
+    let body = match view.file_names.first() {
+        Some(name) if view.file_count == 1 => format!("{name} is in {folder}"),
+        _ => format!("They're in {folder}"),
+    };
+    (title, body)
 }
 
 fn offer_window_label(id: &Uuid) -> String {
@@ -1091,7 +1177,7 @@ impl ReceiveHandler for DesktopHandler {
                     speed_bps: 0.0,
                     eta_secs: None,
                     verification_code: Some(offer.from.verification_code.clone()),
-                    folder: Some(state.download_dir().display().to_string()),
+                    folder: Some(offer.folder.display().to_string()),
                     started_ms: now_ms(),
                 },
                 rate: RateMeter::default(),
@@ -1138,6 +1224,47 @@ impl ReceiveHandler for DesktopHandler {
             self.0.emit();
         } else {
             self.0.finish_transfer(&id, state, detail, None);
+            if state == TransferState::Done {
+                self.0.notify_saved(&id);
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn received(names: &[&str]) -> TransferView {
+        TransferView {
+            id: "t".into(),
+            direction: "receive",
+            peer_name: "POCO X4 Pro 5G".into(),
+            file_names: names.iter().map(|n| n.to_string()).collect(),
+            file_count: names.len(),
+            total_bytes: 10,
+            done_bytes: 10,
+            state: TransferState::Done,
+            detail: None,
+            speed_bps: 0.0,
+            eta_secs: None,
+            verification_code: None,
+            folder: Some(r"C:\Users\you\Downloads\Beam".into()),
+            started_ms: 0,
+        }
+    }
+
+    #[test]
+    fn a_saved_file_is_named_with_its_folder() {
+        let (title, body) = saved_message(&received(&["IMG_0042.jpg"]));
+        assert_eq!(title, "Saved from POCO X4 Pro 5G");
+        assert_eq!(body, r"IMG_0042.jpg is in C:\Users\you\Downloads\Beam");
+    }
+
+    #[test]
+    fn several_saved_files_are_counted() {
+        let (title, body) = saved_message(&received(&["a.jpg", "b.jpg", "c.mp4"]));
+        assert_eq!(title, "Saved 3 files from POCO X4 Pro 5G");
+        assert_eq!(body, r"They're in C:\Users\you\Downloads\Beam");
     }
 }

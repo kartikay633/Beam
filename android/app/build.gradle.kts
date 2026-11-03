@@ -23,14 +23,25 @@ android {
         applicationId = "dev.beam.android"
         minSdk = 29
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 7
+        versionName = "0.1.6"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Only the ABIs libbeam_core_ffi.so is built for (ML Kit ships more).
         ndk { abiFilters += abis }
     }
 
     signingConfigs {
+        // Production keys stay outside the repository. Without these the
+        // release APK remains unsigned; debug builds retain the shared test key.
+        val releaseStore = providers.environmentVariable("BEAM_ANDROID_KEYSTORE").orNull
+        if (releaseStore != null) {
+            create("production") {
+                storeFile = file(releaseStore)
+                storePassword = providers.environmentVariable("BEAM_ANDROID_STORE_PASSWORD").get()
+                keyAlias = providers.environmentVariable("BEAM_ANDROID_KEY_ALIAS").get()
+                keyPassword = providers.environmentVariable("BEAM_ANDROID_KEY_PASSWORD").get()
+            }
+        }
         // One debug key for every machine and CI run, so a new build
         // installs over the last one. A different key forces an uninstall,
         // which wipes the device's identity and its trusted devices.
@@ -46,6 +57,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("production")
         }
     }
 

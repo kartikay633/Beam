@@ -61,11 +61,19 @@ pub(super) async fn run_control(
     handler: Arc<dyn ReceiveHandler>,
 ) {
     let config = &shared.config;
-    let peer =
-        match answer_control(&mut conn, hello, &handshake, &config.device, &config.trust).await {
-            Ok(peer) => peer,
-            Err(e) => return handler.connection_refused(&e),
-        };
+    let peer = match answer_control(
+        &mut conn,
+        hello,
+        &handshake,
+        &config.device,
+        &config.trust,
+        config.save_folders.capabilities(),
+    )
+    .await
+    {
+        Ok(peer) => peer,
+        Err(e) => return handler.connection_refused(&e),
+    };
     let offer = match tokio::time::timeout(OFFER_TIMEOUT, conn.read_frame()).await {
         Ok(Ok(Frame::Offer(offer))) => offer,
         Ok(Ok(Frame::PairRequest(request))) => {
@@ -111,7 +119,13 @@ async fn receive(
         }
     };
 
-    let dir = shared.config.download_dir.clone();
+    // Only a trusted sender picks the folder, and only from our own list.
+    let dir = offer
+        .destination
+        .as_deref()
+        .filter(|_| peer.is_trusted())
+        .and_then(|id| shared.config.save_folders.resolve(id))
+        .unwrap_or_else(|| shared.config.download_dir.clone());
     super::manifest::remove_stale(&dir, &shared.active_ids());
     let previous = Manifest::load(&dir, transfer_id);
     let resumable = previous
@@ -154,6 +168,7 @@ async fn receive(
             })
             .collect(),
         total_size: offer.total_size,
+        folder: dir.clone(),
     };
     let decision = if resumable || auto_accepted {
         Decision::Accept
@@ -933,6 +948,7 @@ mod tests {
                 })
                 .collect(),
             total_size,
+            destination: None,
         }
     }
 

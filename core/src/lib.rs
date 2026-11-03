@@ -29,7 +29,7 @@ pub use messages::{DeviceId, DeviceType, PROTOCOL_VERSION};
 pub use pairing::{pair_with, PairingCode, PairingCodeError, PairingWindow};
 pub use receiver::{
     BoxFuture, Decision, IncomingOffer, ReceiveHandler, ReceiveOutcome, Receiver, ReceiverConfig,
-    ReceiverHandle, SavedFile,
+    ReceiverHandle, SaveFolders, SavedFile,
 };
 pub use sanitize::sanitize_file_name;
 pub use secure::{secure_connection, HandshakeInfo, Role};

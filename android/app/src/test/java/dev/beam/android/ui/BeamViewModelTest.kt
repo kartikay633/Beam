@@ -1,5 +1,6 @@
 package dev.beam.android.ui
 
+import androidx.lifecycle.viewModelScope
 import dev.beam.android.data.BeamRepository
 import dev.beam.android.data.FakeNode
 import dev.beam.android.data.FileAccess
@@ -13,6 +14,7 @@ import dev.beam.core.NearbyLink
 import dev.beam.core.OutgoingFile
 import java.io.IOException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
@@ -41,7 +43,7 @@ class BeamViewModelTest {
     @After
     fun tearDown() = Dispatchers.resetMain()
 
-    private fun TestScope.viewModel(): Pair<BeamViewModel, BeamRepository> {
+    private fun TestScope.viewModel(onSend: (String) -> Unit = {}): Pair<BeamViewModel, BeamRepository> {
         val repo = BeamRepository(
             // Not backgroundScope: advanceUntilIdle doesn't run work launched there.
             scope = this,
@@ -51,7 +53,7 @@ class BeamViewModelTest {
             saveReceived = { emptyList() },
             io = dispatcher,
         )
-        return BeamViewModel(repo, files, settings, io = dispatcher) to repo
+        return BeamViewModel(repo, files, settings, io = dispatcher, onSend = onSend) to repo
     }
 
     @Test
@@ -84,7 +86,7 @@ class BeamViewModelTest {
         advanceUntilIdle()
         assertTrue(vm.staged.value.isEmpty())
         val (target, sent) = node.sent.single()
-        assertEquals(laptop.deviceId, target)
+        assertEquals("192.168.1.20:9000", target)
         assertEquals(listOf("a", "b"), sent.map { it.name })
         assertTrue(files.cleanedUp)
     }
@@ -133,7 +135,7 @@ class BeamViewModelTest {
         assertTrue("nothing to send to yet", node.sent.isEmpty())
         node.listener.deviceFound(laptop)
         advanceUntilIdle()
-        assertEquals(laptop.deviceId, node.sent.single().first)
+        assertEquals("192.168.1.20:9000", node.sent.single().first)
         assertTrue(vm.staged.value.isEmpty())
     }
 
@@ -151,6 +153,8 @@ class BeamViewModelTest {
     class FakeFiles : FileAccess {
         var failOpen = false
         var cleanedUp = false
+        var closedUnsent = 0
+        var beforeOpen: () -> Unit = {}
 
         override fun describe(uri: String): StagedFile? {
             if (uri.endsWith("broken")) throw SecurityException("no permission")
@@ -158,8 +162,82 @@ class BeamViewModelTest {
         }
 
         override fun open(files: List<StagedFile>): OpenedFiles {
+            beforeOpen()
             if (failOpen) throw IOException("provider crashed")
-            return OpenedFiles(files.map { OutgoingFile(it.name, 0, FileSource.Path("/cache/${it.name}")) }) { cleanedUp = true }
+            return OpenedFiles(files.map { OutgoingFile(it.name, 0, FileSource.Path("/cache/${it.name}")) },
+                closeUnsent = { closedUnsent++ }) { cleanedUp = true }
         }
+    }
+
+    @Test
+    fun delayedDirectShareDoesNotSendFilesStagedForAnotherRecipient() = runTest(dispatcher) {
+        val (vm, repo) = viewModel()
+        repo.start()
+        vm.stageAndSendTo(listOf("content://a"), laptop.deviceId)
+        advanceTimeBy(1_000)
+        vm.stage(listOf("content://b"))
+        advanceTimeBy(1_000)
+        node.listener.deviceFound(laptop)
+        advanceUntilIdle()
+        assertEquals(listOf("a"), node.sent.single().second.map { it.name })
+        assertEquals(listOf("b"), vm.staged.value.map { it.name })
+    }
+
+    @Test
+    fun clearedDirectShareDoesNotSendAReplacementSelection() = runTest(dispatcher) {
+        val (vm, repo) = viewModel()
+        repo.start()
+        vm.stageAndSendTo(listOf("content://a"), laptop.deviceId)
+        advanceTimeBy(1_000)
+        vm.clearStaged()
+        vm.stage(listOf("content://b"))
+        advanceTimeBy(1_000)
+        node.listener.deviceFound(laptop)
+        advanceUntilIdle()
+        assertTrue(node.sent.isEmpty())
+        assertEquals(listOf("b"), vm.staged.value.map { it.name })
+    }
+
+    @Test
+    fun failedOpenPreservesFilesStagedWhileTheProviderWasOpening() = runTest(dispatcher) {
+        val (vm, _) = viewModel()
+        vm.stage(listOf("content://a"))
+        advanceUntilIdle()
+        files.failOpen = true
+        files.beforeOpen = {
+            vm.stage(listOf("content://b"))
+            testScheduler.runCurrent()
+            assertEquals(listOf("b"), vm.staged.value.map { it.name })
+        }
+        vm.sendTo(laptop)
+        advanceUntilIdle()
+        assertEquals(setOf("a", "b"), vm.staged.value.map { it.name }.toSet())
+    }
+
+    @Test
+    fun cancellationDuringOpenClosesFilesNotHandedToTheRepository() = runTest(dispatcher) {
+        val (vm, repo) = viewModel()
+        repo.start()
+        vm.stage(listOf("content://a"))
+        advanceUntilIdle()
+        files.beforeOpen = { vm.viewModelScope.cancel() }
+        vm.sendTo(laptop)
+        advanceUntilIdle()
+        assertTrue(node.sent.isEmpty())
+        assertEquals(1, files.closedUnsent)
+        assertTrue(files.cleanedUp)
+    }
+
+    @Test
+    fun shareRankingFailureDoesNotRestageFilesAlreadyHandedToTheSender() = runTest(dispatcher) {
+        val (vm, repo) = viewModel { throw SecurityException("shortcut ranking unavailable") }
+        repo.start()
+        vm.stage(listOf("content://a"))
+        advanceUntilIdle()
+        vm.sendTo(laptop)
+        advanceUntilIdle()
+        assertEquals(1, node.sent.size)
+        assertTrue(vm.staged.value.isEmpty())
+        assertEquals(0, files.closedUnsent)
     }
 }

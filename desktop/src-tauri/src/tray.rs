@@ -42,7 +42,13 @@ pub fn create(app: &AppHandle, mode: VisibilityMode) -> tauri::Result<()> {
         mode == VisibilityMode::Off,
         None::<&str>,
     )?;
-    let quit = MenuItem::with_id(app, "quit", "Quit Beam", true, None::<&str>)?;
+    let quit = MenuItem::with_id(
+        app,
+        "quit",
+        "Quit Beam (stop receiving)",
+        true,
+        None::<&str>,
+    )?;
     let menu = Menu::with_items(
         app,
         &[

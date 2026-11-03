@@ -15,7 +15,7 @@ mod tray;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tauri::{AppHandle, Manager, WindowEvent};
+use tauri::{AppHandle, Manager, RunEvent, WebviewWindowBuilder};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 use crate::state::AppState;
@@ -33,6 +33,7 @@ fn main() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec![MINIMIZED_FLAG]),
@@ -61,13 +62,6 @@ fn main() {
             });
             Ok(())
         })
-        .on_window_event(|window, event| {
-            // Closing the main window keeps Beam running in the tray.
-            if let (WindowEvent::CloseRequested { api, .. }, "main") = (event, window.label()) {
-                api.prevent_close();
-                let _ = window.hide();
-            }
-        })
         .invoke_handler(tauri::generate_handler![
             commands::get_snapshot,
             commands::get_offer,
@@ -85,16 +79,41 @@ fn main() {
             commands::pairing_info,
             commands::open_folder,
         ])
-        .run(tauri::generate_context!())
-        .expect("Beam failed to start");
+        .build(tauri::generate_context!())
+        .expect("Beam failed to start")
+        .run(|_app, event| {
+            // Closing the last window keeps Beam running in the tray; only
+            // Quit (an explicit exit code) ends it.
+            if let RunEvent::ExitRequested {
+                code: None, api, ..
+            } = event
+            {
+                api.prevent_exit();
+            }
+        });
 }
 
+/// Shows the main window, creating it if needed. Closing it destroys it
+/// (and its WebView2 processes), so Beam waiting in the tray stays small.
 pub fn show_main(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-    }
+    let window = match app.get_webview_window("main") {
+        Some(window) => window,
+        None => {
+            let Some(config) = app.config().app.windows.iter().find(|w| w.label == "main") else {
+                return;
+            };
+            match WebviewWindowBuilder::from_config(app, config).and_then(|b| b.build()) {
+                Ok(window) => window,
+                Err(e) => {
+                    eprintln!("could not open the Beam window: {e}");
+                    return;
+                }
+            }
+        }
+    };
+    let _ = window.show();
+    let _ = window.unminimize();
+    let _ = window.set_focus();
 }
 
 /// Files passed on the command line (by Send To) are staged for sending.

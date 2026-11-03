@@ -31,20 +31,19 @@ import dev.beam.android.data.OfflineRadio
 import dev.beam.core.BeamNodeInterface
 import dev.beam.core.BleAdvertisement
 import dev.beam.core.BleConnectRequest
-import dev.beam.core.BleDirectGroup
+import dev.beam.core.BleDirectPeer
 import dev.beam.core.BleConnectResponse
 import dev.beam.core.BleLink
 import dev.beam.core.BleServerSession
-import dev.beam.core.HotspotCredentials
 import dev.beam.core.NearbyDevice
 import dev.beam.core.DeviceKind
-import dev.beam.core.bleSharedLan
 import dev.beam.core.bleUuids
 import dev.beam.core.parseBleHello
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
 import java.net.SocketTimeoutException
+import java.net.Socket
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CompletableDeferred
@@ -55,6 +54,10 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.currentCoroutineContext
 
 /**
  * Beam over Bluetooth LE (SPEC.md 4.2): advertises this phone, scans for
@@ -109,10 +112,9 @@ class BleRadio(
     private class Call {
         /** Where to send (LAN or Wi-Fi Direct `ip:port`), or null to wait for its hello. */
         val answered = CompletableDeferred<String?>()
-        /** The laptop's Wi-Fi Direct group, once joined. */
-        @Volatile var joined: WifiDirectLink.Joined? = null
-        /** Our hotspot, when that's the link. */
-        @Volatile var spot: LocalHotspot.Info? = null
+        /** Owns the selected Wi-Fi link until the send finishes. */
+        val lease = LinkLease()
+        @Volatile var setup: kotlinx.coroutines.Job? = null
     }
 
     @Volatile private var call: Call? = null
@@ -144,12 +146,13 @@ class BleRadio(
     override fun stop() = synchronized(lock) {
         node = null
         stopRadio()
+        direct.stop()
         stateReceiver?.let { runCatching { context.unregisterReceiver(it) } }
         stateReceiver = null
     }
 
     /** Starts or stops the radio to match permissions and the Bluetooth switch. */
-    override fun refresh() = synchronized(lock) {
+    override fun refresh(): Unit = synchronized(lock) {
         stopRadio()
         if (node == null || !available) return
         openServer()
@@ -175,6 +178,7 @@ class BleRadio(
 
     private suspend fun callAndWait(node: BeamNodeInterface, device: NearbyDevice, status: (String) -> Unit): OfflineLink {
         val advert = checkNotNull(node.bleCallAdvertisement(device.deviceId)) { "${device.name} is out of Bluetooth range" }
+        Log.i(TAG, "calling ${device.name}")
         check(call == null) { "Another transfer is setting up; try again in a moment" }
         var keep = false
         val socket = DatagramSocket(null).apply {
@@ -193,21 +197,23 @@ class BleRadio(
             if (answer != null) {
                 // The LAN, or the laptop's Wi-Fi Direct group (left when done).
                 keep = true
-                val joined = pending.joined
-                return OfflineLink(answer, device.deviceId) { joined?.release() }
+                return OfflineLink(answer, device.deviceId, pending.lease::close)
             }
             status("Waiting for ${device.name} to join…")
             val (address, deviceId) = withTimeoutOrNull(JOIN_TIMEOUT_MS) { awaitHello(socket) }
                 ?: error("${device.name} couldn't join this phone's Wi-Fi")
+            val expected = device.deviceId.takeUnless { it.startsWith("ble-") }
+            check(expected == null || expected == deviceId) { "A different device answered the connection request" }
             keep = true
-            return OfflineLink(address, deviceId) { hotspot.release() }
+            return OfflineLink(address, expected ?: deviceId, pending.lease::close)
         } finally {
             call = null
             stopCallAdvertising()
             socket.close()
             if (!keep) {
-                pending.joined?.release()
-                if (pending.spot != null) hotspot.release()
+                pending.answered.cancel()
+                pending.setup?.cancel()
+                pending.lease.close()
             }
         }
     }
@@ -250,7 +256,6 @@ class BleRadio(
         }
         callCallback = callback
         runCatching { le.startAdvertising(settings, data, callback) }
-        Unit
     }
 
     private fun stopCallAdvertising(): Unit = synchronized(lock) {
@@ -259,6 +264,11 @@ class BleRadio(
     }
 
     private fun stopRadio() {
+        call?.let {
+            it.answered.completeExceptionally(IllegalStateException("Bluetooth stopped during connection setup"))
+            it.setup?.cancel()
+            it.lease.close()
+        }
         val le = adapter?.bluetoothLeAdvertiser
         advertiseCallback?.let { runCatching { le?.stopAdvertising(it) } }
         advertiseCallback = null
@@ -424,10 +434,10 @@ class BleRadio(
                 gatt.sendResponse(device, requestId, if (ok) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_WRITE_NOT_PERMITTED, offset, null)
             }
             if (!ok) return
-            val request = runCatching { session!!.receive(value) }
+            val request = runCatching { session.receive(value) }
                 .onFailure { Log.w(TAG, "bad connect request", it) }
                 .getOrNull() ?: return
-            scope.launch { answer(device, session!!, request) }
+            scope.launch { answer(device, session, request) }
         }
 
         override fun onDescriptorWriteRequest(
@@ -450,8 +460,12 @@ class BleRadio(
     /** Chooses a link for the sender and notifies it. */
     private suspend fun answer(device: BluetoothDevice, session: BleServerSession, request: BleConnectRequest) {
         val current = node ?: return
-        val response = runCatching { chooseLink(current, request) }.getOrElse {
-            BleConnectResponse(null, null, null, it.message ?: "couldn't set up a link")
+        val response = try {
+            withTimeout(SETUP_TIMEOUT_MS) { chooseLink(current, request) }
+        } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
+            if (e is CancellationException && e !is TimeoutCancellationException) throw e
+            BleConnectResponse(null, null, null, e.message ?: "couldn't set up a link")
         }
         val peer = peers[device.address] ?: return
         val fragments = runCatching { session.respond(response, peer.mtu.toUInt()) }.getOrElse { return }
@@ -468,73 +482,81 @@ class BleRadio(
     }
 
     private suspend fun chooseLink(node: BeamNodeInterface, request: BleConnectRequest): BleConnectResponse {
+        Log.i(TAG, "connect request: links ${request.links}, direct ${request.direct?.name}, port ${request.port}, called ${call != null}")
         val pending = call
-        val calledPort = request.port
-        if (calledPort != null && pending != null) return answerCall(pending, request, calledPort.toInt())
-        node.sharedLanAddress(request)?.let { return BleConnectResponse(BleLink.LAN, it, null, null) }
-        offeredGroup(request)?.let { group ->
-            joinGroup(group)?.let { joined ->
-                val port = checkNotNull(node.port()) { "Beam isn't receiving" }
-                holdWhileReceiving { joined.release() }
-                return BleConnectResponse(BleLink.WIFI_DIRECT, "${joined.address}:$port", null, null)
+        val calledPort = request.port?.toInt()
+        if (calledPort != null) {
+            check(pending != null) { "There is no outgoing connection request" }
+            pending.setup = currentCoroutineContext()[kotlinx.coroutines.Job]
+        } else {
+            check(node.visibility() != dev.beam.core.Visibility.OFF) { "Beam is hidden; make it visible before receiving" }
+        }
+        val negotiator = LinkNegotiator({ addresses, port ->
+            probeLan(addresses, port, request.direct?.name.takeIf { BleLink.WIFI_DIRECT in request.links })
+        }, ::connectPeer, {
+            val spot = withTimeout(20_000) { hotspot.acquire() }
+            HotspotRoute(spot.ssid, spot.passphrase, spot.address) { hotspot.release() }
+        }, uuids.helloPort.toInt())
+        try {
+            val link = negotiator.negotiate(request, checkNotNull(node.port()).toInt(), calledPort)
+            if (calledPort != null && pending != null) {
+                if (!pending.lease.attach(link.release)) throw CancellationException("Connection request was cancelled")
+                pending.answered.complete(link.sendTarget)
+            } else {
+                holdWhileReceiving(link.release)
             }
+            Log.i(TAG, "selected ${link.response.link}, target ${link.sendTarget ?: link.response.address}")
+            return link.response
+        } catch (e: Exception) {
+            if (calledPort != null) pending?.answered?.completeExceptionally(e)
+            throw e
         }
-        if (BleLink.HOTSPOT !in request.links) {
-            return BleConnectResponse(null, null, null, "no common way to connect")
-        }
-        if (request.hotspot != null) {
-            // Another phone offering its hotspot: joining one needs the
-            // user's approval on every connection, so not yet.
-            return BleConnectResponse(null, null, null, "phone-to-phone transfers without Wi-Fi aren't supported yet")
-        }
-        val port = checkNotNull(node.port()) { "Beam isn't receiving" }
-        val info = hotspot.acquire()
-        holdWhileReceiving { hotspot.release() }
-        // 0.0.0.0 when the hotspot's address couldn't be found: the other
-        // device then tries the hotspot's gateway, which is this phone.
-        return BleConnectResponse(
-            BleLink.HOTSPOT,
-            "${info.address ?: "0.0.0.0"}:$port",
-            HotspotCredentials(info.ssid, info.passphrase),
-            null,
-        )
     }
 
-    /** The device we called connected: tell it how to reach us. */
-    private suspend fun answerCall(pending: Call, request: BleConnectRequest, port: Int): BleConnectResponse {
-        val ours = LocalHotspot.ipv4Addresses().map { it.second }
-        // On one network already: send to its LAN address.
-        bleSharedLan(ours, request.lan)?.let { theirs ->
-            pending.answered.complete("$theirs:$port")
-            return BleConnectResponse(BleLink.LAN, null, null, null)
+    /** A matching subnet is only a hint: require an actual TCP connection. */
+    private suspend fun probeLan(addresses: List<String>, defaultPort: Int?, directPeer: String?): LanRoute? {
+      val route = withContext(Dispatchers.IO) {
+        for (address in addresses.take(8)) {
+            ensureActive()
+            val parts = address.split(':')
+            val host = parts.first()
+            val port = parts.getOrNull(1)?.toIntOrNull() ?: defaultPort ?: continue
+            if (port !in 1..65535) continue
+            val route = runCatching {
+                Socket().use { socket ->
+                    socket.connect(InetSocketAddress(host, port), 1_000)
+                    LanRoute(checkNotNull(socket.localAddress.hostAddress), host)
+                }
+            }.getOrNull()
+            if (route != null) return@withContext route
         }
-        // Its Wi-Fi Direct group: both stay on their own Wi-Fi networks.
-        offeredGroup(request)?.let { group ->
-            joinGroup(group)?.let { joined ->
-                pending.joined = joined
-                pending.answered.complete("${group.address}:$port")
-                return BleConnectResponse(BleLink.WIFI_DIRECT, joined.address, null, null)
-            }
-        }
-        val spot = hotspot.acquire()
-        pending.spot = spot
-        pending.answered.complete(null)
-        return BleConnectResponse(
-            BleLink.HOTSPOT,
-            "${spot.address ?: "0.0.0.0"}:${uuids.helloPort}",
-            HotspotCredentials(spot.ssid, spot.passphrase),
-            null,
-        )
+        null
+      } ?: return null
+      // Acquire after returning from IO: cancellation at that dispatcher
+      // boundary must not strand an already-acquired network lease.
+      val lease = directPeer?.let { direct.retainRoute(route.localAddress, route.remoteAddress, it) }
+      return if (lease == null) route else route.copy(directRelease = lease::release)
     }
 
-    private fun offeredGroup(request: BleConnectRequest): BleDirectGroup? =
-        request.direct?.takeIf { BleLink.WIFI_DIRECT in request.links && direct.supported }
-
-    /** Joins the group, or null (and the hotspot is used instead). */
-    private suspend fun joinGroup(group: BleDirectGroup): WifiDirectLink.Joined? =
-        runCatching { direct.join(group.ssid, group.passphrase, group.address) }
-            .onFailure { Log.w(TAG, "Wi-Fi Direct failed; using the hotspot", it) }
-            .getOrNull()
+    /** Connects to the laptop over Wi-Fi Direct, or null. */
+    private suspend fun connectPeer(peer: BleDirectPeer): DirectRoute? {
+        if (!direct.supported) return null
+        var acquired: WifiDirectLink.Joined? = null
+        return try {
+            val joined = withTimeout(35_000) {
+                direct.connectToPeer(peer.name, null, peer.networkName, peer.passphrase).also { acquired = it }
+            }
+            val host = joined.host
+            if (host == null) { joined.release(); null }
+            else DirectRoute(joined.address, host, joined::release)
+        } catch (e: Exception) {
+            acquired?.release()
+            currentCoroutineContext().ensureActive()
+            if (e is CancellationException && e !is TimeoutCancellationException) throw e
+            Log.w(TAG, "Wi-Fi Direct to ${peer.name} failed; trying another link", e)
+            null
+        }
+    }
 
     /** Keeps a link up for the transfer that should follow, then lets it go. */
     private fun holdWhileReceiving(release: () -> Unit) = scope.launch {
@@ -558,7 +580,8 @@ class BleRadio(
     companion object {
         const val TAG = "BeamBle"
         /** How long a called laptop has to notice and connect. */
-        const val CALL_TIMEOUT_MS = 45_000L
+        const val CALL_TIMEOUT_MS = 90_000L
+        const val SETUP_TIMEOUT_MS = 75_000L
         /** How long it has to join the hotspot and say hello. */
         const val JOIN_TIMEOUT_MS = 60_000L
         val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")

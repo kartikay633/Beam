@@ -6,7 +6,7 @@ members = ["core", "core-ffi", "cli", "desktop/src-tauri"]
 default-members = ["core", "core-ffi", "cli"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/kartikay633/Beam"

@@ -13,6 +13,7 @@ struct Recorder {
     saved: Mutex<Vec<String>>,
     adverts: Mutex<Vec<Option<ServiceAdvert>>>,
     ble_adverts: Mutex<Vec<Option<BleAdvertisement>>>,
+    offers: Mutex<Vec<String>>,
 }
 
 impl Recorder {
@@ -24,6 +25,7 @@ impl Recorder {
             saved: Mutex::default(),
             adverts: Mutex::default(),
             ble_adverts: Mutex::default(),
+            offers: Mutex::default(),
         })
     }
 
@@ -60,6 +62,7 @@ impl BeamListener for Recorder {
         self.push(format!("lost {device_id}"));
     }
     fn offer_received(&self, offer: IncomingOffer) {
+        self.offers.lock().unwrap().push(offer.offer_id.clone());
         self.push(format!(
             "offer {} from {}",
             offer.files.len(),
@@ -97,6 +100,9 @@ impl BeamListener for Recorder {
             "finished {result:?} {}",
             message.unwrap_or_default()
         ));
+    }
+    fn save_folders_offered(&self, _device_id: String, folders: Vec<String>) {
+        self.push(format!("folders {}", folders.join(",")));
     }
     fn paired(&self, device: TrustedDevice) {
         self.push(format!("paired {}", device.name));
@@ -152,6 +158,113 @@ fn node_with(
 /// node's own runtime.
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
     tokio::runtime::Runtime::new().unwrap().block_on(future)
+}
+
+#[test]
+fn qr_pairing_uses_the_new_private_link_without_changing_identity_checks() {
+    use beam_core::{
+        DeviceType, Identity, LocalDevice, PairingCode, PairingWindow, Receiver, ReceiverConfig,
+        TrustStore, VisibilityMode,
+    };
+    struct NoOffers;
+    impl beam_core::ReceiveHandler for NoOffers {
+        fn decide(&self, _: beam_core::IncomingOffer) -> beam_core::BoxFuture<beam_core::Decision> {
+            Box::pin(async { beam_core::Decision::Reject("not a file test".into()) })
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let desktop = LocalDevice {
+        identity: Identity::generate(),
+        name: "PC".into(),
+        device_type: DeviceType::Laptop,
+    };
+    let trust = TrustStore::in_memory();
+    let pairing = PairingWindow::default();
+    let token = pairing.open();
+    let receiver = runtime
+        .block_on(Receiver::bind(
+            "127.0.0.1:0",
+            ReceiverConfig {
+                device: desktop.clone(),
+                download_dir: dir.path().join("inbox"),
+                save_folders: Default::default(),
+                trust: trust.clone(),
+                visibility: beam_core::Visibility::new(VisibilityMode::Everyone),
+                pairing,
+            },
+        ))
+        .unwrap();
+    let address = receiver.local_addr().unwrap().to_string();
+    let server = runtime.spawn(receiver.run(NoOffers));
+    let phone = node(dir.path(), "Phone", DeviceKind::Phone, Recorder::new(None));
+    let code = PairingCode {
+        device_id: desktop.device_id(),
+        public_key: *desktop.identity.public_key(),
+        name: desktop.name.clone(),
+        addresses: vec!["127.0.0.1:1".parse().unwrap()],
+        token,
+    };
+    let paired = block_on(phone.pair_at(code.to_uri(), address.clone())).unwrap();
+    assert_eq!(paired.device_id, desktop.device_id().to_string());
+    assert!(trust
+        .get(&phone.device_id().parse().unwrap())
+        .unwrap()
+        .is_some());
+    // A negotiated address must never override the identity in the QR.
+    let impostor = Identity::generate();
+    let bad_code = PairingCode {
+        device_id: impostor.device_id(),
+        public_key: *impostor.public_key(),
+        ..code
+    };
+    let error = block_on(phone.pair_at(bad_code.to_uri(), address))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("expected to reach") && error.contains("answered"),
+        "{error}"
+    );
+    server.abort();
+}
+
+#[test]
+fn cancelling_the_ffi_future_does_not_leave_a_detached_sender() {
+    let dir = tempfile::tempdir().unwrap();
+    let laptop_events = Recorder::new(None);
+    let laptop = node(
+        dir.path(),
+        "Laptop",
+        DeviceKind::Laptop,
+        laptop_events.clone(),
+    );
+    let phone = node(dir.path(), "Phone", DeviceKind::Phone, Recorder::new(None));
+    let port = laptop.start().unwrap();
+    let source = dir.path().join("source.txt");
+    std::fs::write(&source, b"must not be sent after cancelling").unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let sending_phone = phone.clone();
+    let task = runtime.spawn(async move {
+        sending_phone
+            .send_to(
+                "cancelled-api-call".into(),
+                format!("127.0.0.1:{port}"),
+                None,
+                "Laptop".into(),
+                vec![path_file(&source, "cancelled.txt")],
+            )
+            .await
+    });
+    laptop_events.wait_for("offer");
+    task.abort();
+    let _ = runtime.block_on(task);
+    let offer = laptop_events.offers.lock().unwrap()[0].clone();
+    laptop.respond_offer(offer, true, false).unwrap();
+    laptop_events.wait_for("finished");
+    assert!(
+        !dir.path().join("Laptop/incoming/cancelled.txt").exists(),
+        "the cancelled FFI future left a sender running in the node runtime"
+    );
 }
 
 fn path_file(path: &std::path::Path, name: &str) -> OutgoingFile {
@@ -435,10 +548,10 @@ fn bluetooth_handshake_through_the_api() {
         }),
         capabilities: 0,
         port: None,
-        direct: Some(BleDirectGroup {
-            ssid: "DIRECT-Bm-4f2a".into(),
-            passphrase: "kq7Pz2mWx9LtR3vB".into(),
-            address: "192.168.137.1".into(),
+        direct: Some(BleDirectPeer {
+            name: "KARTIKAY".into(),
+            network_name: Some("DIRECT-abBeam".into()),
+            passphrase: Some("temporary-direct-key".into()),
         }),
     };
     let client = phone

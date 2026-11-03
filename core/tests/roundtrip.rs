@@ -64,6 +64,7 @@ fn frame() -> impl Strategy<Value = Frame> {
                     transfer_id,
                     files,
                     total_size,
+                    destination: None,
                 })
             })
             .boxed(),

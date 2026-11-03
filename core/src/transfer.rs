@@ -82,6 +82,17 @@ impl PeerInfo {
     pub fn is_trusted(&self) -> bool {
         self.trusted.is_some()
     }
+
+    /// The folder ids this peer offered to save into (its HELLO's
+    /// `save-to:` capabilities), in the order it listed them.
+    pub fn save_to(&self) -> Vec<String> {
+        self.hello
+            .capabilities
+            .iter()
+            .filter_map(|c| c.strip_prefix(crate::messages::SAVE_TO_PREFIX))
+            .map(str::to_string)
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,20 +252,27 @@ where
 }
 
 /// Receiver side, once the first frame on a new connection was a HELLO. We
-/// reply with our HELLO before checking, so both ends can report a version
-/// mismatch clearly.
+/// reply with our HELLO even when the check fails, so both ends can report a
+/// version mismatch clearly. A trusted peer also learns `trusted_capabilities`
+/// (the folders it may save into).
 pub(crate) async fn answer_control<S>(
     conn: &mut Connection<S>,
     hello: Hello,
     handshake: &HandshakeInfo,
     me: &LocalDevice,
     trust: &TrustStore,
+    trusted_capabilities: Vec<String>,
 ) -> Result<PeerInfo, TransferError>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
-    conn.send(&Frame::Hello(me.hello())).await?;
-    verify_peer(hello, handshake, trust)
+    let peer = verify_peer(hello, handshake, trust);
+    let mut ours = me.hello();
+    if peer.as_ref().is_ok_and(PeerInfo::is_trusted) {
+        ours.capabilities = trusted_capabilities;
+    }
+    conn.send(&Frame::Hello(ours)).await?;
+    peer
 }
 
 /// Checks the peer's HELLO against what the handshake proved: the major

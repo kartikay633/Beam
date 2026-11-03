@@ -3,6 +3,7 @@ package dev.beam.android.ui
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -16,10 +17,16 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -39,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.beam.android.data.BeamState
 import dev.beam.android.data.StagedFile
+import dev.beam.android.data.saveKey
 import dev.beam.android.model.Format
 import dev.beam.android.service.Notifications
 import dev.beam.core.NearbyDevice
@@ -133,7 +141,12 @@ fun HomeScreen(
                                 }
                             }
                             DeviceRow(device, onClick = send) {
-                                if (staged.isEmpty()) Chevron() else RowButton("Send", send)
+                                RowButton(if (staged.isEmpty()) "Send files" else "Send", send)
+                            }
+                            val key = saveKey(device.name)
+                            val folders = state.saveFolders[key].orEmpty()
+                            if (device.trusted && folders.isNotEmpty()) {
+                                SaveToChoice(folders, state.saveTo[key]) { vm.setSaveTo(device, it) }
                             }
                         }
                     }
@@ -230,4 +243,45 @@ private fun visibilityLabel(state: BeamState): String {
         Visibility.TRUSTED_ONLY -> "Visible to trusted devices"
         Visibility.OFF -> "Hidden"
     }
+}
+
+/** "Save to  Desktop ▾": which folder on the PC the files land in. */
+@Composable
+private fun SaveToChoice(folders: List<String>, chosen: String?, onChoose: (String?) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Row(
+        Modifier.fillMaxWidth().padding(start = 70.dp, end = 16.dp, bottom = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("Save to", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Box {
+            TextButton(onClick = { open = true }) {
+                Text(folderLabel(chosen), fontSize = 13.sp)
+                Icon(Icons.Filled.ArrowDropDown, null)
+            }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                (listOf<String?>(null) + folders).forEach { folder ->
+                    DropdownMenuItem(
+                        text = { Text(folderLabel(folder)) },
+                        onClick = {
+                            open = false
+                            onChoose(folder)
+                        },
+                        trailingIcon = { if (folder == chosen) Icon(Icons.Filled.Check, "Selected") },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** A PC folder id as people say it; null is the PC's own Beam folder. */
+private fun folderLabel(id: String?) = when (id) {
+    null -> "Beam folder"
+    "downloads" -> "Downloads"
+    "desktop" -> "Desktop"
+    "documents" -> "Documents"
+    "pictures" -> "Pictures"
+    "videos" -> "Videos"
+    else -> id.replaceFirstChar { it.uppercase() }
 }

@@ -27,6 +27,16 @@ through UniFFI bindings from [`core-ffi/`](../core-ffi). See
 ./gradlew connectedDebugAndroidTest  # instrumented tests, on a device or emulator
 ```
 
+For production, keep the signing key outside this repository and set
+`BEAM_ANDROID_KEYSTORE`, `BEAM_ANDROID_STORE_PASSWORD`,
+`BEAM_ANDROID_KEY_ALIAS`, and `BEAM_ANDROID_KEY_PASSWORD`, then run
+`./gradlew assembleRelease lintRelease`. Without these variables the
+release APK is unsigned. The shared debug key is for testing only; keep
+the existing installed signing identity when updating to preserve trust.
+
+The 0.1.1 candidate's software checks and outstanding physical-device
+checks are recorded in [the release notes](../docs/RELEASE-0.1.7.md).
+
 Every build first runs two Gradle tasks:
 
 - `cargoNdkBuild`: `cargo ndk … build -p beam-core-ffi --release` into
@@ -51,8 +61,10 @@ For a faster build while developing, build only the ABI of your phone:
 
 ## Trying it
 
-Install the APK on a phone on the same Wi-Fi as a laptop running the
-desktop app (or `beam-cli receive`). Then:
+Install the APK on a phone and open Beam on the laptop. Enable Wi-Fi and
+Bluetooth on both devices and Location on Android for Direct discovery.
+A shared Wi-Fi network is optional for the desktop app; `beam-cli receive`
+uses an already reachable network. USB tethering is not required. Then:
 
 - **Phone → laptop:** share a photo from the gallery to **Beam**, then tap
   the laptop under **Nearby**. Accept on the laptop after comparing the

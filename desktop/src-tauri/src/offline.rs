@@ -1,5 +1,5 @@
 //! Beam with no shared network: Bluetooth LE to find phones and agree on a
-//! link, then the phone's hotspot for the transfer (SPEC.md 4.2 and 5).
+//! link, then a reachable LAN or laptop-hosted Wi-Fi Direct for the transfer.
 //!
 //! The formats and crypto are `beam_core::ble`; this module drives the
 //! Windows radios through WinRT:
@@ -11,9 +11,9 @@
 //! - **the GATT client**: the phone always hosts the GATT service. To send
 //!   to a phone we connect and ask for a link. When a phone wants to send to
 //!   us it *calls* us (an advertisement naming this laptop), and we connect
-//!   to it, take its hotspot, and say hello with our port;
-//! - **joining the phone's hotspot** (`WiFiAdapter`), then going back to the
-//!   previous Wi-Fi network when the transfer is over.
+//!   to it and negotiate the same LAN/Direct routes;
+//! - **hosting Wi-Fi Direct**, alongside the existing Wi-Fi association.
+//!   Beam never joins the phone's hotspot or restores a different SSID.
 //!
 //! Windows doesn't host the GATT service itself because advertising through
 //! `GattServiceProvider` aborts on real hardware where a plain publisher
@@ -28,6 +28,9 @@ use beam_core::DeviceId;
 
 use crate::state::AppState;
 
+#[cfg(any(windows, test))]
+mod calls;
+
 /// A phone heard over Bluetooth.
 #[derive(Debug, Clone)]
 pub struct BleSighting {
@@ -36,6 +39,32 @@ pub struct BleSighting {
     pub random_address: bool,
     pub rssi: i16,
     pub seen: Instant,
+}
+
+/// Appends a line to Beam's log of connections with no shared network
+/// (`%LOCALAPPDATA%\\Beam\\offline.log`, kept under 1 MB), so a failure on
+/// real devices can be traced afterwards.
+pub fn log(line: impl AsRef<str>) {
+    use std::io::Write;
+    let Some(dir) = dirs::data_local_dir().map(|d| d.join("Beam")) else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("offline.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1_000_000) {
+        let _ = std::fs::rename(&path, dir.join("offline.old.log"));
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let (h, m, s) = (secs / 3600 % 24, secs / 60 % 60, secs % 60);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{h:02}:{m:02}:{s:02} UTC {}", line.as_ref());
+    }
 }
 
 /// A Bluetooth sighting is dropped after this long without hearing it again.
@@ -49,27 +78,23 @@ pub fn lan_ips() -> Vec<IpAddr> {
         .collect()
 }
 
-/// Where to send after a Bluetooth handshake. Dropping it gives back any
-/// hotspot this laptop joined, or the Wi-Fi Direct group it hosted, for
-/// the transfer.
+/// Where to send after a Bluetooth handshake. Dropping it releases the
+/// Wi-Fi Direct group lease without changing the current Wi-Fi network.
 pub struct OfflineLink {
     pub addr: SocketAddr,
     pub expect: Option<DeviceId>,
-    _wifi: Option<WifiLease>,
     _group: Option<GroupLease>,
 }
 
 #[cfg(windows)]
-pub use win::{GroupLease, Radio, WifiLease};
+pub use win::{GroupLease, Radio};
 
 #[cfg(not(windows))]
-pub use stub::{GroupLease, Radio, WifiLease};
+pub use stub::{GroupLease, Radio};
 
 #[cfg(not(windows))]
 mod stub {
     use super::*;
-
-    pub struct WifiLease;
 
     pub struct GroupLease;
 
@@ -80,6 +105,9 @@ mod stub {
             Err("Bluetooth is only supported on Windows".into())
         }
         pub fn update_advertisement(&self) {}
+        pub fn refresh(&self) -> Result<(), String> {
+            Err("Bluetooth is only supported on Windows".into())
+        }
         pub async fn connect(
             &self,
             _sighting: &BleSighting,
@@ -87,25 +115,6 @@ mod stub {
         ) -> Result<OfflineLink, String> {
             Err("Bluetooth is only supported on Windows".into())
         }
-    }
-}
-
-/// Where to connect after joining a phone's hotspot: the address it gave,
-/// or (when it couldn't tell) its gateway address on our new subnet.
-fn hotspot_target(addr: Option<&str>, our_ip: IpAddr) -> Result<SocketAddr, String> {
-    let addr: SocketAddr = addr
-        .ok_or("the phone didn't say where to connect")?
-        .parse()
-        .map_err(|_| "the phone sent an unreadable address".to_string())?;
-    if !addr.ip().is_unspecified() {
-        return Ok(addr);
-    }
-    match our_ip {
-        IpAddr::V4(v4) => {
-            let [a, b, c, _] = v4.octets();
-            Ok(SocketAddr::new(IpAddr::from([a, b, c, 1]), addr.port()))
-        }
-        IpAddr::V6(_) => Err("no IPv4 address on the phone's hotspot".into()),
     }
 }
 
@@ -123,15 +132,21 @@ mod win {
 
     use std::collections::HashMap;
     use std::sync::Mutex;
+    use tokio::sync::watch;
 
     use beam_core::ble::{
         self, fragment, BleAdvert, ConnectRequest, GattClientHandshake, LinkKind, Reassembler,
         PREFERRED_MTU,
     };
-    use windows::core::{Ref, GUID, HSTRING};
+    #[cfg(test)]
+    use windows::core::Interface;
+    #[cfg(test)]
+    use windows::core::HSTRING;
+    use windows::core::{Ref, GUID};
     use windows::Devices::Bluetooth::Advertisement::{
         BluetoothLEAdvertisementDataSection, BluetoothLEAdvertisementPublisher,
-        BluetoothLEAdvertisementReceivedEventArgs, BluetoothLEAdvertisementWatcher,
+        BluetoothLEAdvertisementPublisherStatus, BluetoothLEAdvertisementReceivedEventArgs,
+        BluetoothLEAdvertisementWatcher, BluetoothLEAdvertisementWatcherStatus,
         BluetoothLEScanningMode,
     };
     use windows::Devices::Bluetooth::GenericAttributeProfile::{
@@ -141,25 +156,62 @@ mod win {
     use windows::Devices::Bluetooth::{
         BluetoothAdapter, BluetoothAddressType, BluetoothCacheMode, BluetoothLEDevice,
     };
-    use windows::Devices::WiFi::{
-        WiFiAccessStatus, WiFiAdapter, WiFiAvailableNetwork, WiFiConnectionStatus,
-        WiFiReconnectionKind,
+    #[cfg(test)]
+    use windows::Devices::Enumeration::{DeviceInformation, DeviceInformationKind};
+    use windows::Devices::Enumeration::{
+        DevicePairingKinds, DevicePairingProtectionLevel, DevicePairingRequestedEventArgs,
+        DevicePairingResultStatus,
     };
     use windows::Devices::WiFiDirect::{
-        WiFiDirectAdvertisementPublisher, WiFiDirectAdvertisementPublisherStatus,
+        WiFiDirectAdvertisementListenStateDiscoverability, WiFiDirectAdvertisementPublisher,
+        WiFiDirectAdvertisementPublisherStatus, WiFiDirectConfigurationMethod,
+        WiFiDirectConnectionListener, WiFiDirectConnectionParameters, WiFiDirectConnectionRequest,
+        WiFiDirectConnectionRequestedEventArgs, WiFiDirectConnectionStatus, WiFiDirectDevice,
+        WiFiDirectPairingProcedure,
     };
+    #[cfg(test)]
+    use windows::Foundation::IReference;
     use windows::Foundation::TypedEventHandler;
-    use windows::Networking::Connectivity::NetworkInformation;
-    use windows::Networking::HostNameType;
+    #[cfg(test)]
     use windows::Security::Credentials::PasswordCredential;
     use windows::Storage::Streams::{DataReader, DataWriter, IBuffer};
+    #[cfg(test)]
+    use windows_collections::IIterable;
 
     use crate::state::lock;
 
     type WinResult<T> = windows::core::Result<T>;
 
-    /// A call from the same phone within this long is the same call.
-    const CALL_DEBOUNCE: Duration = Duration::from_secs(30);
+    fn win_error(message: impl AsRef<str>) -> windows::core::Error {
+        windows::core::Error::new(
+            windows::core::HRESULT(0x80004005_u32 as i32),
+            message.as_ref(),
+        )
+    }
+
+    struct OnDrop<F: FnOnce()>(Option<F>);
+    impl<F: FnOnce()> Drop for OnDrop<F> {
+        fn drop(&mut self) {
+            if let Some(action) = self.0.take() {
+                action();
+            }
+        }
+    }
+
+    /// WinRT Wi-Fi Direct connection operations must be CREATED on the UI
+    /// thread. Their asynchronous results can then be awaited by Tokio.
+    async fn on_ui<T: Send + 'static>(
+        app: &tauri::AppHandle,
+        action: impl FnOnce() -> WinResult<T> + Send + 'static,
+    ) -> WinResult<T> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        app.run_on_main_thread(move || {
+            let _ = tx.send(action());
+        })
+        .map_err(|e| win_error(e.to_string()))?;
+        rx.await
+            .map_err(|_| win_error("Beam closed while setting up Wi-Fi Direct"))?
+    }
 
     fn guid(uuid: &str) -> GUID {
         GUID::from_u128(uuid::Uuid::parse_str(uuid).expect("a valid UUID").as_u128())
@@ -198,54 +250,225 @@ mod win {
         /// Scan-response names by Bluetooth address (they arrive separately).
         names: Mutex<HashMap<u64, String>>,
         /// Phones whose call we're answering, by address, and since when.
-        calls: Mutex<HashMap<u64, Instant>>,
-        /// Hotspots joined to receive from a phone, released when done.
-        receiving_wifi: Mutex<Vec<WifiLease>>,
-        /// The Wi-Fi Direct group we host for phones to join, if up.
-        group: Mutex<Option<HostedGroup>>,
-        /// Our group, held for phones sending to us over it, and since when.
+        calls: Mutex<super::calls::Calls>,
+        /// Accepting Wi-Fi Direct connections from phones, while needed.
+        direct: Mutex<Option<DirectHost>>,
+        /// Wi-Fi Direct links held for phones sending to us, and since when.
         receiving_groups: Mutex<Vec<(Instant, GroupLease)>>,
     }
 
-    /// A Wi-Fi Direct group this laptop hosts. Windows keeps its Wi-Fi
-    /// network meanwhile (on the same channel), so the laptop stays online.
-    struct HostedGroup {
+    /// This laptop as a Wi-Fi Direct device that phones connect to. While a
+    /// Bluetooth handshake is under way it accepts their connection
+    /// requests in code (no Windows prompt) and becomes the group owner;
+    /// Windows keeps its own Wi-Fi network meanwhile.
+    struct DirectHost {
+        id: uuid::Uuid,
+        session: uuid::Uuid,
         publisher: WiFiDirectAdvertisementPublisher,
-        group: ble::DirectGroup,
+        _listener: WiFiDirectConnectionListener,
+        /// Requests are accepted until then: only while a phone we're
+        /// talking to over Bluetooth is expected to connect.
+        accepting_until: Instant,
+        /// Phones connected to us, with their Wi-Fi Direct addresses.
+        devices: Vec<(WiFiDirectDevice, String)>,
         users: usize,
+        cancel_pending: watch::Sender<bool>,
         /// When the last user let go.
         idle_since: Option<Instant>,
     }
 
-    /// Keeps the hosted group up while held.
-    pub struct GroupLease(Weak<Radio>);
+    /// Keeps the Wi-Fi Direct links up while held.
+    pub struct GroupLease(Weak<Radio>, uuid::Uuid);
 
     impl Drop for GroupLease {
         fn drop(&mut self) {
             let Some(radio) = self.0.upgrade() else {
                 return;
             };
-            let mut group = lock(&radio.group);
-            if let Some(hosted) = group.as_mut() {
-                hosted.users = hosted.users.saturating_sub(1);
-                if hosted.users == 0 {
-                    hosted.idle_since = Some(Instant::now());
-                }
+            let mut direct = lock(&radio.direct);
+            if let Some(host) = direct.as_mut().filter(|host| host.id == self.1) {
+                release_direct(&mut host.users, &mut host.idle_since, &host.cancel_pending);
             }
         }
     }
 
-    /// An unused group is closed after this long (a next transfer reuses it).
-    const GROUP_IDLE: Duration = Duration::from_secs(30);
-
-    /// Links to offer in a `CONNECT_REQUEST`, best first.
-    fn links(direct: bool) -> Vec<LinkKind> {
-        let mut links = vec![LinkKind::Lan];
-        if direct {
-            links.push(LinkKind::WifiDirect);
+    /// Makes Windows forget its Wi-Fi Direct pairing with the phone at
+    /// `address`. Windows keeps one after every connection, and the phone
+    /// keeps the group with it; next time the phone tries to re-open that
+    /// group, which fails once the laptop's Wi-Fi is on another channel
+    /// ("no common channel", and MIUI asks to disconnect the phone's
+    /// Wi-Fi). Without the pairing Windows answers "unknown group" instead,
+    /// and Android then forgets the group and negotiates a fresh one.
+    #[cfg(test)]
+    pub(super) async fn forget_direct_pairing(address: &str) -> usize {
+        // Wi-Fi Direct's protocol id in Windows' device association queries.
+        let aqs = HSTRING::from(
+            "System.Devices.Aep.ProtocolId:=\"{0407d24e-53de-4c9a-9ba1-9ced54641188}\" AND \
+             System.Devices.Aep.IsPaired:=System.StructuredQueryType.Boolean#True",
+        );
+        let key = HSTRING::from("System.Devices.Aep.DeviceAddress");
+        // Not Send: dropped before the first await.
+        let op = {
+            let properties = IIterable::<HSTRING>::from(vec![key.clone()]);
+            DeviceInformation::FindAllAsyncWithKindAqsFilterAndAdditionalProperties(
+                &aqs,
+                &properties,
+                DeviceInformationKind::AssociationEndpoint,
+            )
+        };
+        let found = match op {
+            Ok(op) => match op.await {
+                Ok(found) => found,
+                Err(e) => {
+                    log(format!(
+                        "listing Wi-Fi Direct pairings failed: {}",
+                        e.message()
+                    ));
+                    return 0;
+                }
+            },
+            Err(_) => return 0,
+        };
+        // Read everything first: the collection's iterator isn't Send.
+        let paired: Vec<(DeviceInformation, String)> = found
+            .into_iter()
+            .map(|info| {
+                // The id is "WiFiDirect#2A:F1:E2:8C:5B:65"; Windows often
+                // leaves the address property empty.
+                let paired_address = info
+                    .Properties()
+                    .and_then(|p| p.Lookup(&key))
+                    .and_then(|v| v.cast::<IReference<HSTRING>>())
+                    .and_then(|r| r.Value())
+                    .map(|a| a.to_string().to_lowercase())
+                    .ok()
+                    .filter(|a| !a.is_empty())
+                    .or_else(|| {
+                        let id = info.Id().ok()?.to_string();
+                        Some(id.split_once('#')?.1.split('_').next()?.to_lowercase())
+                    })
+                    .unwrap_or_default();
+                (info, paired_address)
+            })
+            .collect();
+        let mut forgotten = 0;
+        for (info, paired_address) in paired {
+            if !address.is_empty() && paired_address != address {
+                continue;
+            }
+            let Ok(op) = info.Pairing().and_then(|p| p.UnpairAsync()) else {
+                continue;
+            };
+            let result = op.await.and_then(|r| r.Status());
+            log(format!(
+                "forgot Wi-Fi Direct pairing with {:?} ({paired_address}): {result:?}",
+                info.Name().unwrap_or_default()
+            ));
+            forgotten += 1;
         }
-        links.push(LinkKind::Hotspot);
-        links
+        forgotten
+    }
+
+    /// How long after a handshake starts a phone may take to connect.
+    const ACCEPT_WINDOW: Duration = Duration::from_secs(90);
+
+    /// Unused links are closed after this long (a next transfer reuses them).
+    const GROUP_IDLE: Duration = Duration::from_secs(60);
+
+    /// Offer only links that leave the existing Wi-Fi association intact.
+    fn links(direct: bool) -> Vec<LinkKind> {
+        if direct {
+            vec![LinkKind::Lan, LinkKind::WifiDirect]
+        } else {
+            vec![LinkKind::Lan]
+        }
+    }
+
+    fn preserve_wifi(link: Option<LinkKind>) -> Result<(), String> {
+        if link == Some(LinkKind::Hotspot) {
+            Err("Beam will not join the phone's hotspot because it would replace your Wi-Fi connection. Use a reachable shared Wi-Fi network or Wi-Fi Direct.".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn beam_characteristics<T>(mut found: HashMap<GUID, T>) -> Result<[T; 3], String> {
+        let mut take = |uuid| {
+            found
+                .remove(&guid(uuid))
+                .ok_or_else(|| "the phone's Beam service is incomplete".to_string())
+        };
+        Ok([
+            take(ble::INFO_UUID)?,
+            take(ble::CONNECT_REQUEST_UUID)?,
+            take(ble::CONNECT_RESPONSE_UUID)?,
+        ])
+    }
+
+    fn setup_stage(started: Instant, stage: &str) {
+        log(format!(
+            "setup +{} ms: {stage}",
+            started.elapsed().as_millis()
+        ));
+    }
+
+    fn accepts_direct(users: usize, until: Instant, now: Instant) -> bool {
+        users > 0 && now < until
+    }
+
+    fn reusable_direct(users: usize, connected: bool) -> bool {
+        users > 0 || connected
+    }
+
+    fn accepts_direct_session(
+        current: uuid::Uuid,
+        requested: uuid::Uuid,
+        users: usize,
+        until: Instant,
+        now: Instant,
+    ) -> bool {
+        current == requested && accepts_direct(users, until, now)
+    }
+
+    fn release_direct(users: &mut usize, idle: &mut Option<Instant>, cancel: &watch::Sender<bool>) {
+        *users = users.saturating_sub(1);
+        if *users == 0 {
+            *idle = Some(Instant::now());
+            cancel.send_replace(true);
+        }
+    }
+
+    fn direct_publisher() -> WinResult<WiFiDirectAdvertisementPublisher> {
+        let publisher = WiFiDirectAdvertisementPublisher::new()?;
+        let advertisement = publisher.Advertisement()?;
+        advertisement.SetListenStateDiscoverability(
+            WiFiDirectAdvertisementListenStateDiscoverability::Normal,
+        )?;
+        // Use peer provisioning. This phone's P2P interface is rejected by
+        // Windows' legacy AP path even with the correct group credentials.
+        advertisement.SetIsAutonomousGroupOwnerEnabled(false)?;
+        advertisement.LegacySettings()?.SetIsEnabled(false)?;
+        Ok(publisher)
+    }
+
+    /// The name Windows uses for this PC in Wi-Fi Direct discovery.
+    fn direct_name() -> Option<String> {
+        use windows::Win32::System::SystemInformation::{
+            ComputerNameDnsHostname, GetComputerNameExW,
+        };
+        let mut buffer = [0u16; 256];
+        let mut len = buffer.len() as u32;
+        // SAFETY: the buffer and its length match.
+        unsafe {
+            GetComputerNameExW(
+                ComputerNameDnsHostname,
+                Some(windows::core::PWSTR(buffer.as_mut_ptr())),
+                &mut len,
+            )
+        }
+        .ok()?;
+        let name = String::from_utf16_lossy(&buffer[..len as usize]);
+        (!name.is_empty()).then_some(name)
     }
 
     impl Radio {
@@ -268,8 +491,7 @@ mod win {
                 publisher: Mutex::default(),
                 names: Mutex::default(),
                 calls: Mutex::default(),
-                receiving_wifi: Mutex::default(),
-                group: Mutex::default(),
+                direct: Mutex::default(),
                 receiving_groups: Mutex::default(),
             });
             let me = Arc::downgrade(&radio);
@@ -286,7 +508,7 @@ mod win {
                 .map_err(text)?;
             radio.watcher.Start().map_err(text)?;
             radio.update_advertisement();
-            radio.clone().release_hotspots_when_idle();
+            radio.clone().release_groups_when_idle();
             Ok(radio)
         }
 
@@ -326,6 +548,31 @@ mod win {
                 Ok(publisher)
             })();
             *current = started.ok();
+        }
+
+        /// Recover after Windows stops the radios when Bluetooth is toggled.
+        pub fn refresh(&self) -> Result<(), String> {
+            if self.watcher.Status().map_err(text)?
+                != BluetoothLEAdvertisementWatcherStatus::Started
+            {
+                self.watcher.Start().map_err(text)?;
+            }
+            let visible = self
+                .state
+                .upgrade()
+                .is_some_and(|s| s.visibility.mode() != beam_core::VisibilityMode::Off);
+            let advertising = lock(&self.publisher).as_ref().is_some_and(|p| {
+                p.Status().ok() == Some(BluetoothLEAdvertisementPublisherStatus::Started)
+            });
+            if visible && !advertising {
+                self.update_advertisement();
+                if !lock(&self.publisher).as_ref().is_some_and(|p| {
+                    p.Status().ok() == Some(BluetoothLEAdvertisementPublisherStatus::Started)
+                }) {
+                    return Err("Turn on Bluetooth to find devices without shared Wi-Fi".into());
+                }
+            }
+            Ok(())
         }
 
         // ---------------------------------------------------- scanning
@@ -375,19 +622,23 @@ mod win {
 
         // ---------------------------------------------------- calls
 
-        /// A phone called: connect to it, take its hotspot (or LAN), and
+        /// A phone called: connect to it, negotiate LAN or Wi-Fi Direct, and
         /// tell it where we receive.
         fn answer_call(self: Arc<Self>, address: u64, random: bool) {
             {
-                let mut calls = lock(&self.calls);
-                calls.retain(|_, since| since.elapsed() < CALL_DEBOUNCE);
-                if calls.contains_key(&address) {
+                if !lock(&self.calls).begin(address, Instant::now()) {
                     return;
                 }
-                calls.insert(address, Instant::now());
             }
+            log(format!("call from {address:012x}"));
             tauri::async_runtime::spawn(async move {
-                if let Err(problem) = self.take_call(address, random).await {
+                let result =
+                    tokio::time::timeout(Duration::from_secs(120), self.take_call(address, random))
+                        .await
+                        .unwrap_or_else(|_| Err("connection setup timed out".into()));
+                lock(&self.calls).finish(address, Instant::now());
+                if let Err(problem) = result {
+                    log(format!("call from {address:012x} failed: {problem}"));
                     if let Some(state) = self.state.upgrade() {
                         state
                             .show_error(format!("A phone tried to send over Bluetooth: {problem}"));
@@ -397,82 +648,81 @@ mod win {
         }
 
         async fn take_call(self: &Arc<Self>, address: u64, random: bool) -> Result<(), String> {
+            let started = Instant::now();
             let state = self.state.upgrade().ok_or("Beam is closing")?;
             let device = Self::device(address, random).await?;
-            let group = self.host_group().await;
+            setup_stage(started, "receiving: Bluetooth device ready");
+            let close = device.clone();
+            let _device = OnDrop(Some(move || {
+                let _ = close.Close();
+            }));
+            let direct = self.listen_direct().await;
+            setup_stage(started, "receiving: Wi-Fi Direct offer ready");
+            log(format!(
+                "answering: Wi-Fi Direct as {:?}",
+                direct.as_ref().map(|(p, _)| &p.name)
+            ));
             let request = ConnectRequest {
                 caps: 0,
-                links: links(group.is_some()),
-                lan: lan_ips().iter().map(ToString::to_string).collect(),
+                links: links(direct.is_some()),
+                lan: lan_ips()
+                    .iter()
+                    .map(|ip| SocketAddr::new(*ip, state.port()).to_string())
+                    .collect(),
                 hotspot: None,
                 port: Some(state.port()),
-                direct: group.as_ref().map(|(g, _)| g.clone()),
+                direct: direct.as_ref().map(|(peer, _)| peer.clone()),
             };
             let response = Self::handshake(&device, &request).await.map_err(text);
             let _ = device.Close();
             let response = response??;
+            setup_stage(started, "receiving: phone replied");
+            preserve_wifi(response.link)?;
+            log(format!(
+                "phone answered: {:?} {:?} {:?}",
+                response.link, response.addr, response.reason
+            ));
             match response.link {
                 // On one network: the phone sends to our LAN address.
                 Some(LinkKind::Lan) => Ok(()),
-                // The phone joined our group and sends to our address there.
+                // The phone connected over Wi-Fi Direct and sends to us there.
                 Some(LinkKind::WifiDirect) => {
-                    let (_, lease) = group.ok_or("the phone chose a group we don't host")?;
+                    let (_, lease) =
+                        direct.ok_or("the phone chose Wi-Fi Direct, which we didn't offer")?;
                     lock(&self.receiving_groups).push((Instant::now(), lease));
                     Ok(())
-                }
-                Some(LinkKind::Hotspot) => {
-                    let hotspot = response
-                        .hotspot
-                        .as_ref()
-                        .ok_or("the phone offered no hotspot")?;
-                    let lease = WifiLease::join(&hotspot.ssid, &hotspot.passphrase).await?;
-                    let phone = hotspot_target(response.addr.as_deref(), lease.ip)?;
-                    lock(&self.receiving_wifi).push(lease);
-                    self.say_hello(&state, phone).await
                 }
                 _ => Err(declined(&response, "the phone")),
             }
         }
 
-        /// Tells the phone our address on its hotspot until its transfer
-        /// arrives (UDP can be lost; the phone acts on the first).
-        async fn say_hello(&self, state: &AppState, phone: SocketAddr) -> Result<(), String> {
-            let socket = tokio::net::UdpSocket::bind("0.0.0.0:0")
-                .await
-                .map_err(|e| e.to_string())?;
-            let hello = ble::hello_packet(&state.device, state.port());
-            for _ in 0..40 {
-                let _ = socket.send_to(&hello, phone).await;
-                if state.is_receiving() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-            Ok(())
-        }
-
-        /// Gives back hotspots joined to receive, once nothing is arriving.
-        fn release_hotspots_when_idle(self: Arc<Self>) {
+        /// Releases unused private Wi-Fi Direct groups.
+        fn release_groups_when_idle(self: Arc<Self>) {
             tauri::async_runtime::spawn(async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(10)).await;
                     let Some(state) = self.state.upgrade() else {
                         return;
                     };
+                    self.release_disconnected_groups();
                     if !state.is_receiving() {
                         // Leave time for the transfer to start before letting go.
-                        lock(&self.receiving_wifi)
-                            .retain(|lease| lease.joined.elapsed() < Duration::from_secs(90));
                         lock(&self.receiving_groups)
                             .retain(|(since, _)| since.elapsed() < Duration::from_secs(90));
                     }
-                    let mut group = lock(&self.group);
-                    let unused = group.as_ref().is_some_and(|hosted| {
-                        hosted.idle_since.is_some_and(|t| t.elapsed() >= GROUP_IDLE)
+                    let transferring = state.is_transferring();
+                    let mut direct = lock(&self.direct);
+                    let unused = direct.as_ref().is_some_and(|host| {
+                        !transferring && host.idle_since.is_some_and(|t| t.elapsed() >= GROUP_IDLE)
                     });
                     if unused {
-                        if let Some(hosted) = group.take() {
-                            let _ = hosted.publisher.Stop();
+                        if let Some(host) = direct.take() {
+                            let _ = host.publisher.Stop();
+                            // Release native handles after the idle window;
+                            // this never disconnects the infrastructure STA.
+                            for (device, _) in host.devices {
+                                let _ = device.Close();
+                            }
                         }
                     }
                 }
@@ -481,29 +731,54 @@ mod win {
 
         // ---------------------------------------------------- sending
 
-        /// Asks a phone heard over Bluetooth for a link, joining its hotspot
-        /// when it offers one.
+        /// Asks a phone heard over Bluetooth for LAN or Wi-Fi Direct.
         pub async fn connect(
             self: &Arc<Self>,
             sighting: &BleSighting,
             status: &(dyn Fn(&str) + Sync),
         ) -> Result<OfflineLink, String> {
+            let started = Instant::now();
             let name = &sighting.device.name;
             status("Connecting over Bluetooth…");
             let device = Self::device(sighting.address, sighting.random_address).await?;
-            let group = self.host_group().await;
+            setup_stage(started, "sending: Bluetooth device ready");
+            let close = device.clone();
+            let _device = OnDrop(Some(move || {
+                let _ = close.Close();
+            }));
+            let direct = self.listen_direct().await;
+            setup_stage(started, "sending: Wi-Fi Direct offer ready");
+            log(format!(
+                "sending to {name}: Wi-Fi Direct as {:?}",
+                direct.as_ref().map(|(p, _)| &p.name)
+            ));
             let request = ConnectRequest {
                 caps: 0,
-                links: links(group.is_some()),
-                lan: lan_ips().iter().map(ToString::to_string).collect(),
+                links: links(direct.is_some()),
+                lan: lan_ips()
+                    .iter()
+                    .map(|ip| {
+                        SocketAddr::new(*ip, self.state.upgrade().map_or(0, |s| s.port()))
+                            .to_string()
+                    })
+                    .collect(),
                 hotspot: None,
                 port: None,
-                direct: group.as_ref().map(|(g, _)| g.clone()),
+                direct: direct.as_ref().map(|(peer, _)| peer.clone()),
             };
             status(&format!("Waiting for {name} to connect…"));
             let response = Self::handshake(&device, &request).await.map_err(text);
             let _ = device.Close();
+            if let Err(e) = &response {
+                log(format!("handshake with {name} failed: {e}"));
+            }
             let response = response??;
+            setup_stage(started, "sending: phone replied");
+            preserve_wifi(response.link)?;
+            log(format!(
+                "{name} answered: {:?} {:?} {:?}",
+                response.link, response.addr, response.reason
+            ));
             let expect = sighting.device.device_id;
             match response.link {
                 Some(LinkKind::Lan) => Ok(OfflineLink {
@@ -514,26 +789,13 @@ mod win {
                         .parse()
                         .map_err(|_| "the phone sent an unreadable address".to_string())?,
                     expect,
-                    _wifi: None,
                     _group: None,
                 }),
-                Some(LinkKind::Hotspot) => {
-                    let hotspot = response
-                        .hotspot
-                        .as_ref()
-                        .ok_or("the phone offered no hotspot")?;
-                    status(&format!("Joining {name}'s Wi-Fi…"));
-                    let lease = WifiLease::join(&hotspot.ssid, &hotspot.passphrase).await?;
-                    Ok(OfflineLink {
-                        addr: hotspot_target(response.addr.as_deref(), lease.ip)?,
-                        expect,
-                        _wifi: Some(lease),
-                        _group: None,
-                    })
-                }
-                // The phone joined our group: it receives at its address there.
+                // The phone connected over Wi-Fi Direct: it receives at its
+                // address there.
                 Some(LinkKind::WifiDirect) => {
-                    let (_, lease) = group.ok_or("the phone chose a group we don't host")?;
+                    let (_, lease) =
+                        direct.ok_or("the phone chose Wi-Fi Direct, which we didn't offer")?;
                     Ok(OfflineLink {
                         addr: response
                             .addr
@@ -542,95 +804,351 @@ mod win {
                             .parse()
                             .map_err(|_| "the phone sent an unreadable address".to_string())?,
                         expect,
-                        _wifi: None,
                         _group: Some(lease),
                     })
                 }
-                None => Err(declined(&response, name)),
+                _ => Err(declined(&response, name)),
             }
         }
 
         // ---------------------------------------------------- Wi-Fi Direct
 
-        /// Hosts a Wi-Fi Direct group for a phone to join (or shares the one
-        /// already up). `None` when this adapter can't; the phone then falls
-        /// back to its hotspot.
-        async fn host_group(self: &Arc<Self>) -> Option<(ble::DirectGroup, GroupLease)> {
-            if let Some(shared) = self.share_group() {
-                return Some(shared);
-            }
-            let before = lan_ips();
-            let random = uuid::Uuid::new_v4().simple().to_string();
-            // Android requires "DIRECT-" and two characters.
-            let ssid = format!("DIRECT-Bm-{}", &random[..4]);
-            let passphrase = random[4..24].to_string();
-            let publisher = (|| -> WinResult<WiFiDirectAdvertisementPublisher> {
-                let publisher = WiFiDirectAdvertisementPublisher::new()?;
-                let advertisement = publisher.Advertisement()?;
-                advertisement.SetIsAutonomousGroupOwnerEnabled(true)?;
-                let legacy = advertisement.LegacySettings()?;
-                legacy.SetIsEnabled(true)?;
-                legacy.SetSsid(&HSTRING::from(&ssid))?;
-                let credential = PasswordCredential::new()?;
-                credential.SetPassword(&HSTRING::from(&passphrase))?;
-                legacy.SetPassphrase(&credential)?;
-                publisher.Start()?;
-                Ok(publisher)
-            })()
-            .ok()?;
-            // The group's address appears on a new virtual adapter, usually
-            // within a second.
-            let mut addr = None;
-            for _ in 0..25 {
-                if publisher.Status().ok() == Some(WiFiDirectAdvertisementPublisherStatus::Aborted)
-                {
-                    break;
+        /// Accepts Wi-Fi Direct connections for the next minute (starting the
+        /// listener if needed). `None` when this PC can't do Wi-Fi Direct.
+        async fn listen_direct(self: &Arc<Self>) -> Option<(ble::DirectPeer, GroupLease)> {
+            let state = self.state.upgrade()?;
+            let radio = self.clone();
+            match on_ui(&state.app, move || Ok(radio.listen_direct_on_ui())).await {
+                Ok(result) => result,
+                Err(e) => {
+                    log(format!("Wi-Fi Direct unavailable: {}", e.message()));
+                    None
                 }
-                if let Some(ip) = lan_ips().into_iter().find(|ip| !before.contains(ip)) {
-                    addr = Some(ip);
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(200)).await;
             }
-            let Some(addr) = addr else {
-                let _ = publisher.Stop();
-                return None;
-            };
-            let group = ble::DirectGroup {
-                ssid,
-                passphrase,
-                addr: addr.to_string(),
-            };
-            let mut current = lock(&self.group);
-            if current.is_some() {
-                // Another transfer started one meanwhile: use that.
-                drop(current);
-                let _ = publisher.Stop();
-                return self.share_group();
-            }
-            *current = Some(HostedGroup {
-                publisher,
-                group: group.clone(),
-                users: 1,
-                idle_since: None,
-            });
-            Some((group, GroupLease(Arc::downgrade(self))))
         }
 
-        /// The group already up, if it still is.
-        fn share_group(self: &Arc<Self>) -> Option<(ble::DirectGroup, GroupLease)> {
-            let mut current = lock(&self.group);
-            let hosted = current.as_mut()?;
-            if hosted.publisher.Status().ok()
-                != Some(WiFiDirectAdvertisementPublisherStatus::Started)
-            {
-                let _ = hosted.publisher.Stop();
-                *current = None;
-                return None;
+        fn listen_direct_on_ui(self: &Arc<Self>) -> Option<(ble::DirectPeer, GroupLease)> {
+            let name = direct_name()?;
+            self.release_disconnected_groups();
+            let mut direct = lock(&self.direct);
+            let running = direct.as_ref().is_some_and(|host| {
+                reusable_direct(
+                    host.users,
+                    host.devices.iter().any(|(device, _)| {
+                        device.ConnectionStatus().ok()
+                            == Some(WiFiDirectConnectionStatus::Connected)
+                    }),
+                ) && host.publisher.Status().ok()
+                    == Some(WiFiDirectAdvertisementPublisherStatus::Started)
+            });
+            if !running {
+                if let Some(old) = direct.take() {
+                    log("retiring unused Wi-Fi Direct group before a fresh setup");
+                    old.cancel_pending.send_replace(true);
+                    let _ = old.publisher.Stop();
+                    for (device, _) in old.devices {
+                        let _ = device.Close();
+                    }
+                }
+                *direct = Some(self.start_direct().ok()?);
             }
-            hosted.users += 1;
-            hosted.idle_since = None;
-            Some((hosted.group.clone(), GroupLease(Arc::downgrade(self))))
+            let host = direct.as_mut()?;
+            host.accepting_until = Instant::now() + ACCEPT_WINDOW;
+            if host.users == 0 {
+                // Pending requests from the previous transfer keep their
+                // cancelled receiver; a new transfer gets a fresh window.
+                host.cancel_pending = watch::channel(false).0;
+                host.session = uuid::Uuid::new_v4();
+            }
+            host.users += 1;
+            host.idle_since = None;
+            Some((
+                ble::DirectPeer {
+                    name,
+                    network_name: None,
+                    passphrase: None,
+                },
+                GroupLease(Arc::downgrade(self), host.id),
+            ))
+        }
+
+        fn pending_direct(&self, id: uuid::Uuid) -> Option<(uuid::Uuid, watch::Receiver<bool>)> {
+            let direct = lock(&self.direct);
+            let host = direct.as_ref().filter(|host| {
+                host.id == id && accepts_direct(host.users, host.accepting_until, Instant::now())
+            })?;
+            Some((host.session, host.cancel_pending.subscribe()))
+        }
+
+        fn release_disconnected_groups(&self) {
+            if self
+                .state
+                .upgrade()
+                .is_some_and(|state| state.is_receiving())
+            {
+                return;
+            }
+            let disconnected = lock(&self.direct)
+                .as_ref()
+                .filter(|host| {
+                    !host.devices.is_empty()
+                        && host.devices.iter().all(|(device, _)| {
+                            device.ConnectionStatus().ok()
+                                == Some(WiFiDirectConnectionStatus::Disconnected)
+                        })
+                })
+                .map(|host| host.id);
+            if let Some(id) = disconnected {
+                // The phone has already left. Keeping these receive leases
+                // for the setup grace period would reuse its inactive WPS group.
+                lock(&self.receiving_groups).retain(|(_, lease)| lease.1 != id);
+            }
+        }
+
+        fn active_direct_session(&self, id: uuid::Uuid, session: uuid::Uuid) -> bool {
+            lock(&self.direct).as_ref().is_some_and(|host| {
+                host.id == id
+                    && accepts_direct_session(
+                        host.session,
+                        session,
+                        host.users,
+                        host.accepting_until,
+                        Instant::now(),
+                    )
+            })
+        }
+
+        fn start_direct(self: &Arc<Self>) -> WinResult<DirectHost> {
+            let publisher = direct_publisher()?;
+            let host_id = uuid::Uuid::new_v4();
+            let listener = WiFiDirectConnectionListener::new()?;
+            let me = Arc::downgrade(self);
+            listener.ConnectionRequested(&TypedEventHandler::new(
+                move |_, args: Ref<WiFiDirectConnectionRequestedEventArgs>| {
+                    let (Some(radio), Ok(args)) = (me.upgrade(), args.ok()) else {
+                        return Ok(());
+                    };
+                    let request = args.GetConnectionRequest()?;
+                    let pending = radio.pending_direct(host_id);
+                    log(format!(
+                        "Wi-Fi Direct request (expected: {})",
+                        pending.is_some()
+                    ));
+                    if let Some((session, cancel)) = pending {
+                        tauri::async_runtime::spawn(async move {
+                            match radio.accept_direct(request, host_id, session, cancel).await {
+                                Ok(()) => log("Wi-Fi Direct connected"),
+                                Err(e) => {
+                                    log(format!("Wi-Fi Direct accept failed: {}", e.message()))
+                                }
+                            }
+                        });
+                    } else {
+                        // No live transfer owns this request. Close it now.
+                        let _ = request.Close();
+                    }
+                    Ok(())
+                },
+            ))?;
+            publisher.Start()?;
+            log(format!(
+                "Wi-Fi Direct publisher (negotiated group): {:?}",
+                publisher.Status()
+            ));
+            Ok(DirectHost {
+                id: host_id,
+                session: uuid::Uuid::new_v4(),
+                publisher,
+                _listener: listener,
+                accepting_until: Instant::now(),
+                devices: Vec::new(),
+                users: 0,
+                cancel_pending: watch::channel(true).0,
+                idle_since: None,
+            })
+        }
+
+        /// Accepts a phone's request: push-button pairing handled here, so
+        /// Windows shows nothing, then the connection, kept while in use.
+        async fn accept_direct(
+            self: Arc<Self>,
+            request: WiFiDirectConnectionRequest,
+            host_id: uuid::Uuid,
+            session: uuid::Uuid,
+            mut cancel: watch::Receiver<bool>,
+        ) -> WinResult<()> {
+            let close = request.clone();
+            let _request = OnDrop(Some(move || {
+                let _ = close.Close();
+            }));
+            tokio::select! {
+                biased;
+                _ = cancel.wait_for(|cancelled| *cancelled) => Err(win_error("Wi-Fi Direct transfer setup ended; pairing cancelled")),
+                result = self.accept_direct_inner(request, host_id, session) => result,
+            }
+        }
+
+        async fn accept_direct_inner(
+            self: Arc<Self>,
+            request: WiFiDirectConnectionRequest,
+            host_id: uuid::Uuid,
+            session: uuid::Uuid,
+        ) -> WinResult<()> {
+            if !self.active_direct_session(host_id, session) {
+                return Err(win_error("Wi-Fi Direct request expired"));
+            }
+            let info = request.DeviceInformation()?;
+            let id = info.Id()?;
+            // "WiFiDirect#2A:F1:E2:8C:5B:65_PendingRequest": the phone's address.
+            let address = id
+                .to_string()
+                .split_once('#')
+                .map(|(_, rest)| rest.split('_').next().unwrap_or(rest).to_lowercase())
+                .unwrap_or_default();
+            let pairing = info.Pairing()?;
+            let already = pairing.IsPaired().unwrap_or(false);
+            log(format!(
+                "request from {} ({id}), paired already: {already}",
+                info.Name()?
+            ));
+            // A phone that connected before stays paired (Wi-Fi Direct keeps a
+            // persistent group): pairing again stalls, so connect straight away.
+            if !already {
+                self.pair_direct(&info).await?;
+            }
+            if !self.active_direct_session(host_id, session) {
+                return Err(win_error("Wi-Fi Direct request expired after pairing"));
+            }
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| win_error("Beam is closing"))?;
+            let (operation, _cancel) = on_ui(&state.app, move || {
+                let operation = WiFiDirectDevice::FromIdAsync(&id)?;
+                let cancel = operation.clone();
+                Ok((
+                    operation,
+                    OnDrop(Some(move || {
+                        let _ = cancel.Cancel();
+                    })),
+                ))
+            })
+            .await?;
+            let device = match tokio::time::timeout(Duration::from_secs(25), operation)
+                .await
+                .map_err(|_| win_error("Wi-Fi Direct connection timed out"))?
+            {
+                Ok(device) => device,
+                Err(e) => {
+                    log(format!(
+                        "connecting failed ({:?}): {}",
+                        e.code(),
+                        e.message()
+                    ));
+                    return Err(e);
+                }
+            };
+            log(format!("connected: {:?}", device.ConnectionStatus()));
+            if let Some(host) = lock(&self.direct).as_mut().filter(|host| {
+                host.id == host_id
+                    && accepts_direct_session(
+                        host.session,
+                        session,
+                        host.users,
+                        host.accepting_until,
+                        Instant::now(),
+                    )
+            }) {
+                host.devices.push((device, address));
+            } else {
+                let _ = device.Close();
+                return Err(win_error("Wi-Fi Direct request expired before connecting"));
+            }
+            Ok(())
+        }
+
+        /// Handle push-button confirmation; Windows may still require system consent.
+        async fn pair_direct(
+            &self,
+            info: &windows::Devices::Enumeration::DeviceInformation,
+        ) -> WinResult<()> {
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| win_error("Beam is closing"))?;
+            let info = info.clone();
+            let (_handler, _cancel, operation) = on_ui(&state.app, move || {
+                log(format!(
+                    "Wi-Fi Direct pairing begin: can_pair={:?}, is_paired={:?}",
+                    info.Pairing().and_then(|p| p.CanPair()),
+                    info.Pairing().and_then(|p| p.IsPaired())
+                ));
+                let params = WiFiDirectConnectionParameters::new()?;
+                // Prefer the laptop as owner while allowing normal channel
+                // negotiation. Android requests the client role (intent 0).
+                params.SetGroupOwnerIntent(14)?;
+                params
+                    .PreferenceOrderedConfigurationMethods()?
+                    .Append(WiFiDirectConfigurationMethod::PushButton)?;
+                params.SetPreferredPairingProcedure(WiFiDirectPairingProcedure::Invitation)?;
+                log("Wi-Fi Direct pairing procedure: accepting device selects push-button");
+                let custom = info.Pairing()?.Custom()?;
+                let token = custom.PairingRequested(&TypedEventHandler::new(
+                    |_, args: Ref<DevicePairingRequestedEventArgs>| {
+                        let args = args.ok()?;
+                        let kind = args.PairingKind()?;
+                        log(format!("Wi-Fi Direct pairing ceremony: {kind:?}"));
+                        if kind == DevicePairingKinds::ConfirmOnly {
+                            args.Accept()?;
+                            log("Wi-Fi Direct push-button confirmation accepted");
+                        } else {
+                            log("Wi-Fi Direct pairing requested an unsupported ceremony");
+                        }
+                        Ok(())
+                    },
+                ))?;
+                let cleanup = custom.clone();
+                let handler = OnDrop(Some(move || {
+                    let _ = cleanup.RemovePairingRequested(token);
+                }));
+                let operation = custom.PairWithProtectionLevelAndSettingsAsync(
+                    DevicePairingKinds::ConfirmOnly,
+                    DevicePairingProtectionLevel::Default,
+                    &params,
+                )?;
+                log("Wi-Fi Direct pairing operation created");
+                let cancel = operation.clone();
+                Ok((
+                    handler,
+                    OnDrop(Some(move || {
+                        let _ = cancel.Cancel();
+                    })),
+                    operation,
+                ))
+            })
+            .await?;
+            let paired = tokio::time::timeout(Duration::from_secs(25), operation)
+                .await
+                .map_err(|_| win_error("Wi-Fi Direct pairing timed out"))?;
+            match paired {
+                Ok(result) => {
+                    let status = result.Status()?;
+                    log(format!("pairing: {status:?}"));
+                    if status == DevicePairingResultStatus::Paired
+                        || status == DevicePairingResultStatus::AlreadyPaired
+                    {
+                        Ok(())
+                    } else {
+                        Err(win_error(format!(
+                            "Windows refused Wi-Fi Direct pairing ({status:?})"
+                        )))
+                    }
+                }
+                Err(e) => {
+                    log(format!("pairing failed ({:?}): {}", e.code(), e.message()));
+                    Err(e)
+                }
+            }
         }
 
         async fn device(address: u64, random: bool) -> Result<BluetoothLEDevice, String> {
@@ -651,40 +1169,48 @@ mod win {
             device: &BluetoothLEDevice,
             request: &ConnectRequest,
         ) -> WinResult<Result<ConnectResponse, String>> {
+            let started = Instant::now();
+            let session = GattSession::FromDeviceIdAsync(&device.BluetoothDeviceId()?)?.await?;
+            let _ = session.SetMaintainConnection(true);
+            let cleanup = session.clone();
+            let _session = OnDrop(Some(move || {
+                let _ = cleanup.SetMaintainConnection(false);
+            }));
             let services = device
                 .GetGattServicesForUuidWithCacheModeAsync(
                     guid(ble::SERVICE_UUID),
                     BluetoothCacheMode::Uncached,
                 )?
                 .await?;
-            if services.Status()? != GattCommunicationStatus::Success
-                || services.Services()?.Size()? == 0
-            {
-                return Ok(Err("that phone isn't running Beam".into()));
+            let service_status = services.Status()?;
+            let service_count = services.Services()?.Size()?;
+            log(format!(
+                "BLE service query: {service_status:?}, count={service_count}, connection={:?}",
+                device.ConnectionStatus()
+            ));
+            if service_status != GattCommunicationStatus::Success || service_count == 0 {
+                return Ok(Err("Couldn't reach the phone's Beam Bluetooth service. Keep Beam open on the phone and retry.".into()));
             }
             let service = services.Services()?.GetAt(0)?;
-            let mut found = Vec::new();
-            for uuid in [
-                ble::INFO_UUID,
-                ble::CONNECT_REQUEST_UUID,
-                ble::CONNECT_RESPONSE_UUID,
-            ] {
-                let result = service
-                    .GetCharacteristicsForUuidWithCacheModeAsync(
-                        guid(uuid),
-                        BluetoothCacheMode::Uncached,
-                    )?
-                    .await?;
-                if result.Characteristics()?.Size()? == 0 {
-                    return Ok(Err("the phone's Beam service is incomplete".into()));
-                }
-                found.push(result.Characteristics()?.GetAt(0)?);
+            setup_stage(started, "BLE: service discovered");
+            // One fresh discovery returns all three characteristics. Separate
+            // UUID queries repeat the same on-air discovery round trips.
+            let result = service
+                .GetCharacteristicsWithCacheModeAsync(BluetoothCacheMode::Uncached)?
+                .await?;
+            if result.Status()? != GattCommunicationStatus::Success {
+                return Ok(Err("couldn't discover the phone's Beam service".into()));
             }
-            let [info_char, request_char, response_char]: [GattCharacteristic; 3] = found
-                .try_into()
-                .map_err(|_| windows::core::Error::empty())?;
-            let session = GattSession::FromDeviceIdAsync(&device.BluetoothDeviceId()?)?.await?;
-            let _ = session.SetMaintainConnection(true);
+            let mut found = HashMap::new();
+            for characteristic in result.Characteristics()? {
+                found.insert(characteristic.Uuid()?, characteristic);
+            }
+            let [info_char, request_char, response_char]: [GattCharacteristic; 3] =
+                match beam_characteristics(found) {
+                    Ok(found) => found,
+                    Err(problem) => return Ok(Err(problem)),
+                };
+            setup_stage(started, "BLE: characteristics discovered");
             let mtu = (session.MaxPduSize().unwrap_or(23) as usize).min(PREFERRED_MTU);
 
             let read = info_char
@@ -694,6 +1220,7 @@ mod win {
                 return Ok(Err("couldn't read the phone's Beam info".into()));
             }
             let info = from_buffer(&read.Value()?)?;
+            setup_stage(started, "BLE: peer info read");
 
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
             let token = response_char.ValueChanged(&TypedEventHandler::new(
@@ -706,6 +1233,10 @@ mod win {
                     Ok(())
                 },
             ))?;
+            let cleanup = response_char.clone();
+            let _notification = OnDrop(Some(move || {
+                let _ = cleanup.RemoveValueChanged(token);
+            }));
             let subscribed = response_char
                 .WriteClientCharacteristicConfigurationDescriptorAsync(
                     GattClientCharacteristicConfigurationDescriptorValue::Notify,
@@ -729,9 +1260,10 @@ mod win {
                     return Ok(Err("the phone didn't take the request".into()));
                 }
             }
-            // The phone may start its hotspot before answering.
+            setup_stage(started, "BLE: link request sent");
+            // The phone establishes the private link before answering.
             let mut reassembler = Reassembler::default();
-            let whole = tokio::time::timeout(Duration::from_secs(45), async {
+            let whole = tokio::time::timeout(Duration::from_secs(90), async {
                 while let Some(part) = rx.recv().await {
                     if let Ok(Some(whole)) = reassembler.push(&part) {
                         return Some(whole);
@@ -745,161 +1277,8 @@ mod win {
             let Ok(Some(whole)) = whole else {
                 return Ok(Err("the phone didn't answer over Bluetooth".into()));
             };
+            setup_stage(started, "BLE: link response received");
             Ok(opener.open(&whole).map_err(|e| e.to_string()))
-        }
-    }
-
-    // -------------------------------------------------------- Wi-Fi
-
-    /// A Wi-Fi network joined for a transfer. Dropping it leaves the network
-    /// and reconnects to the one we were on before.
-    pub struct WifiLease {
-        adapter: WiFiAdapter,
-        previous: Option<String>,
-        pub ip: IpAddr,
-        joined: Instant,
-    }
-
-    impl WifiLease {
-        pub async fn join(ssid: &str, passphrase: &str) -> Result<WifiLease, String> {
-            let access = WiFiAdapter::RequestAccessAsync()
-                .map_err(text)?
-                .await
-                .map_err(text)?;
-            if access != WiFiAccessStatus::Allowed {
-                return Err(
-                    "Windows didn't let Beam use Wi-Fi. Check Settings → Privacy → Location."
-                        .into(),
-                );
-            }
-            let find = WiFiAdapter::FindAllAdaptersAsync().map_err(text)?;
-            let adapter = {
-                // Not Send: don't hold it across an await.
-                let adapters = find.await.map_err(text)?;
-                adapters
-                    .GetAt(0)
-                    .map_err(|_| "this computer has no Wi-Fi".to_string())?
-            };
-            let previous = Self::connected_ssid(&adapter).await;
-            let network = Self::find(&adapter, ssid)
-                .await?
-                .ok_or_else(|| format!("couldn't find the phone's Wi-Fi \"{ssid}\""))?;
-            let credential = PasswordCredential::new().map_err(text)?;
-            credential
-                .SetPassword(&HSTRING::from(passphrase))
-                .map_err(text)?;
-            let connect = adapter
-                .ConnectWithPasswordCredentialAsync(
-                    &network,
-                    WiFiReconnectionKind::Manual,
-                    &credential,
-                )
-                .map_err(text)?;
-            let result = connect.await.map_err(text)?;
-            if result.ConnectionStatus().map_err(text)? != WiFiConnectionStatus::Success {
-                return Err(format!("couldn't join \"{ssid}\""));
-            }
-            let id = adapter
-                .NetworkAdapter()
-                .and_then(|n| n.NetworkAdapterId())
-                .map_err(text)?;
-            let mut lease = WifiLease {
-                adapter,
-                previous,
-                ip: IpAddr::from([0, 0, 0, 0]),
-                joined: Instant::now(),
-            };
-            // Wait for an address from the phone's DHCP.
-            for _ in 0..30 {
-                if let Some(ip) = Self::ipv4_on(id) {
-                    lease.ip = ip;
-                    return Ok(lease);
-                }
-                tokio::time::sleep(Duration::from_millis(300)).await;
-            }
-            // Dropping the lease reconnects the previous network.
-            Err("joined the phone's Wi-Fi but got no address".into())
-        }
-
-        async fn connected_ssid(adapter: &WiFiAdapter) -> Option<String> {
-            let profile = adapter
-                .NetworkAdapter()
-                .ok()?
-                .GetConnectedProfileAsync()
-                .ok()?
-                .await
-                .ok()?;
-            let ssid = profile
-                .WlanConnectionProfileDetails()
-                .ok()?
-                .GetConnectedSsid()
-                .ok()?
-                .to_string();
-            (!ssid.is_empty()).then_some(ssid)
-        }
-
-        async fn find(
-            adapter: &WiFiAdapter,
-            ssid: &str,
-        ) -> Result<Option<WiFiAvailableNetwork>, String> {
-            // A new hotspot can take a few scans to show up.
-            for _ in 0..8 {
-                adapter.ScanAsync().map_err(text)?.await.map_err(text)?;
-                let found = {
-                    let networks = adapter
-                        .NetworkReport()
-                        .and_then(|r| r.AvailableNetworks())
-                        .map_err(text)?;
-                    networks
-                        .into_iter()
-                        .find(|n| n.Ssid().map(|s| s == ssid).unwrap_or(false))
-                };
-                if found.is_some() {
-                    return Ok(found);
-                }
-                tokio::time::sleep(Duration::from_millis(700)).await;
-            }
-            Ok(None)
-        }
-
-        fn ipv4_on(adapter_id: GUID) -> Option<IpAddr> {
-            NetworkInformation::GetHostNames()
-                .ok()?
-                .into_iter()
-                .find_map(|host| {
-                    if host.Type().ok()? != HostNameType::Ipv4 {
-                        return None;
-                    }
-                    let id = host
-                        .IPInformation()
-                        .ok()?
-                        .NetworkAdapter()
-                        .ok()?
-                        .NetworkAdapterId()
-                        .ok()?;
-                    (id == adapter_id)
-                        .then(|| host.CanonicalName().ok()?.to_string().parse().ok())?
-                })
-        }
-    }
-
-    impl Drop for WifiLease {
-        fn drop(&mut self) {
-            let adapter = self.adapter.clone();
-            let previous = self.previous.take();
-            tauri::async_runtime::spawn(async move {
-                let _ = adapter.Disconnect();
-                // Windows usually reconnects by itself; ask, in case it doesn't.
-                if let Some(ssid) = previous {
-                    if let Ok(Some(network)) = WifiLease::find(&adapter, &ssid).await {
-                        if let Ok(connect) =
-                            adapter.ConnectAsync(&network, WiFiReconnectionKind::Automatic)
-                        {
-                            let _ = connect.await;
-                        }
-                    }
-                }
-            });
         }
     }
 
@@ -907,6 +1286,152 @@ mod win {
     #[cfg(test)]
     mod hardware {
         use super::*;
+
+        #[test]
+        fn offers_never_ask_the_phone_to_replace_the_laptops_wifi() {
+            assert_eq!(links(true), vec![LinkKind::Lan, LinkKind::WifiDirect]);
+            assert_eq!(links(false), vec![LinkKind::Lan]);
+        }
+
+        #[test]
+        fn an_unsolicited_hotspot_response_is_rejected_before_joining() {
+            assert!(preserve_wifi(Some(LinkKind::Hotspot))
+                .unwrap_err()
+                .contains("Wi-Fi"));
+            assert!(preserve_wifi(Some(LinkKind::Lan)).is_ok());
+            assert!(preserve_wifi(Some(LinkKind::WifiDirect)).is_ok());
+            assert!(preserve_wifi(None).is_ok());
+        }
+
+        #[test]
+        fn one_discovery_result_selects_required_characteristics_by_uuid() {
+            let found = HashMap::from([
+                (guid(ble::CONNECT_RESPONSE_UUID), 3),
+                (guid(ble::INFO_UUID), 1),
+                (GUID::zeroed(), 9),
+                (guid(ble::CONNECT_REQUEST_UUID), 2),
+            ]);
+            assert_eq!(beam_characteristics(found).unwrap(), [1, 2, 3]);
+        }
+
+        #[test]
+        fn an_incomplete_discovery_result_cannot_start_a_handshake() {
+            let found = HashMap::from([(guid(ble::INFO_UUID), 1)]);
+            assert!(beam_characteristics(found).is_err());
+        }
+
+        #[test]
+        fn a_phone_reply_after_setup_finished_is_not_accepted() {
+            let now = Instant::now();
+            let deadline = now + ACCEPT_WINDOW;
+            assert!(accepts_direct(1, deadline, now));
+            assert!(!accepts_direct(0, deadline, now + Duration::from_secs(40)));
+            assert!(!accepts_direct(1, deadline, deadline));
+        }
+
+        #[test]
+        fn a_connected_idle_group_is_reusable_but_an_empty_group_is_not() {
+            assert!(
+                reusable_direct(0, true),
+                "the next sender would close a connected group"
+            );
+            assert!(reusable_direct(1, false));
+            assert!(!reusable_direct(0, false));
+        }
+
+        #[test]
+        fn a_ready_old_pairing_cannot_attach_to_a_fast_retry() {
+            let now = Instant::now();
+            let old_session = uuid::Uuid::new_v4();
+            let retry = uuid::Uuid::new_v4();
+            assert!(accepts_direct_session(
+                retry,
+                retry,
+                1,
+                now + ACCEPT_WINDOW,
+                now
+            ));
+            assert!(!accepts_direct_session(
+                retry,
+                old_session,
+                1,
+                now + ACCEPT_WINDOW,
+                now
+            ));
+        }
+
+        #[tokio::test]
+        async fn ending_the_last_transfer_cancels_pending_pairing() {
+            let (cancel, mut pending) = watch::channel(false);
+            let mut users = 2;
+            let mut idle = None;
+            release_direct(&mut users, &mut idle, &cancel);
+            assert!(!*pending.borrow());
+            assert!(idle.is_none());
+            release_direct(&mut users, &mut idle, &cancel);
+            assert!(idle.is_some());
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                pending.wait_for(|cancelled| *cancelled),
+            )
+            .await
+            .expect("pending pairing survived the last transfer")
+            .unwrap();
+        }
+
+        #[tokio::test]
+        #[ignore = "starts negotiated discovery on a Wi-Fi Direct capable PC; no peer connection"]
+        async fn negotiated_discovery_preserves_existing_wifi() {
+            use windows::Networking::Connectivity::{NetworkConnectivityLevel, NetworkInformation};
+            fn connected_wifi() -> Vec<String> {
+                let mut names: Vec<_> = NetworkInformation::GetConnectionProfiles()
+                    .unwrap()
+                    .into_iter()
+                    .filter(|p| {
+                        p.IsWlanConnectionProfile().unwrap_or(false)
+                            && p.GetNetworkConnectivityLevel().unwrap()
+                                != NetworkConnectivityLevel::None
+                    })
+                    .map(|p| p.ProfileName().unwrap().to_string())
+                    .collect();
+                names.sort();
+                names
+            }
+            let before = connected_wifi();
+            assert!(
+                !before.is_empty(),
+                "this check needs an existing infrastructure Wi-Fi connection"
+            );
+            let publisher = direct_publisher().unwrap();
+            let cleanup = publisher.clone();
+            let _stop = OnDrop(Some(move || {
+                let _ = cleanup.Stop();
+            }));
+            publisher.Start().unwrap();
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            let after = connected_wifi();
+            assert!(
+                before.iter().all(|name| after.contains(name)),
+                "the group replaced an existing Wi-Fi connection"
+            );
+            assert!(
+                !publisher
+                    .Advertisement()
+                    .unwrap()
+                    .IsAutonomousGroupOwnerEnabled()
+                    .unwrap(),
+                "peer provisioning must negotiate the group"
+            );
+            let legacy = publisher.Advertisement().unwrap().LegacySettings().unwrap();
+            assert!(
+                !legacy.IsEnabled().unwrap(),
+                "P2P peers must not be sent through the legacy AP path"
+            );
+            assert_eq!(
+                publisher.Status().unwrap(),
+                WiFiDirectAdvertisementPublisherStatus::Started
+            );
+        }
 
         #[tokio::test]
         #[ignore = "needs a Bluetooth LE adapter"]
@@ -1083,6 +1608,190 @@ mod win {
             let _ = device.Close();
         }
 
+        /// Advertises over Wi-Fi Direct and accepts incoming connection
+        /// requests in code (no Windows pairing prompt), printing each
+        /// step, for BEAM_HOLD_SECS (default 180). BEAM_AUTONOMOUS=1 makes
+        /// this laptop a group owner up front:
+        /// `cargo test -p beam-desktop accept_p2p_connections -- --ignored --nocapture`.
+        #[tokio::test]
+        #[ignore = "needs a Wi-Fi Direct capable adapter and a phone"]
+        async fn accept_p2p_connections() {
+            use windows::Devices::Enumeration::{
+                DeviceInformationCustomPairing, DevicePairingKinds, DevicePairingProtectionLevel,
+                DevicePairingRequestedEventArgs,
+            };
+            use windows::Devices::WiFiDirect::{
+                WiFiDirectAdvertisementListenStateDiscoverability,
+                WiFiDirectAdvertisementPublisher, WiFiDirectConfigurationMethod,
+                WiFiDirectConnectionListener, WiFiDirectConnectionParameters,
+                WiFiDirectConnectionRequest, WiFiDirectConnectionRequestedEventArgs,
+                WiFiDirectDevice, WiFiDirectPairingProcedure,
+            };
+            let hold: u64 = std::env::var("BEAM_HOLD_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(180);
+            let autonomous = std::env::var("BEAM_AUTONOMOUS").is_ok_and(|v| v == "1");
+            let publisher = WiFiDirectAdvertisementPublisher::new().unwrap();
+            let advertisement = publisher.Advertisement().unwrap();
+            advertisement
+                .SetListenStateDiscoverability(
+                    WiFiDirectAdvertisementListenStateDiscoverability::Normal,
+                )
+                .unwrap();
+            advertisement
+                .SetIsAutonomousGroupOwnerEnabled(autonomous)
+                .unwrap();
+            let listener = WiFiDirectConnectionListener::new().unwrap();
+            let (tx, mut rx) =
+                tokio::sync::mpsc::unbounded_channel::<WiFiDirectConnectionRequest>();
+            listener
+                .ConnectionRequested(&TypedEventHandler::new(
+                    move |_, args: Ref<WiFiDirectConnectionRequestedEventArgs>| {
+                        if let Ok(args) = args.ok() {
+                            let _ = tx.send(args.GetConnectionRequest()?);
+                        }
+                        Ok(())
+                    },
+                ))
+                .unwrap();
+            publisher.Start().unwrap();
+            println!(
+                "advertising (autonomous {autonomous}): {:?}",
+                publisher.Status()
+            );
+            let deadline = Instant::now() + Duration::from_secs(hold);
+            let mut devices = Vec::new();
+            while let Ok(Some(request)) = tokio::time::timeout(
+                deadline.saturating_duration_since(Instant::now()),
+                rx.recv(),
+            )
+            .await
+            {
+                let started = Instant::now();
+                let info = request.DeviceInformation().unwrap();
+                println!("request from {:?} id {:?}", info.Name(), info.Id());
+                let params = WiFiDirectConnectionParameters::new().unwrap();
+                params.SetGroupOwnerIntent(15).unwrap();
+                params
+                    .PreferenceOrderedConfigurationMethods()
+                    .unwrap()
+                    .Append(WiFiDirectConfigurationMethod::PushButton)
+                    .unwrap();
+                params
+                    .SetPreferredPairingProcedure(WiFiDirectPairingProcedure::GroupOwnerNegotiation)
+                    .unwrap();
+                let custom: DeviceInformationCustomPairing =
+                    info.Pairing().unwrap().Custom().unwrap();
+                custom
+                    .PairingRequested(&TypedEventHandler::new(
+                        |_, args: Ref<DevicePairingRequestedEventArgs>| {
+                            if let Ok(args) = args.ok() {
+                                println!("  pairing requested: {:?}", args.PairingKind());
+                                args.Accept()?;
+                            }
+                            Ok(())
+                        },
+                    ))
+                    .unwrap();
+                let kinds = DevicePairingKinds(
+                    DevicePairingKinds::ConfirmOnly.0
+                        | DevicePairingKinds::DisplayPin.0
+                        | DevicePairingKinds::ProvidePin.0,
+                );
+                match custom.PairWithProtectionLevelAndSettingsAsync(
+                    kinds,
+                    DevicePairingProtectionLevel::Default,
+                    &params,
+                ) {
+                    Ok(op) => match op.await {
+                        Ok(result) => {
+                            println!("  {:?} paired: {:?}", started.elapsed(), result.Status())
+                        }
+                        Err(e) => println!("  pairing failed: {e}"),
+                    },
+                    Err(e) => println!("  pairing call failed: {e}"),
+                }
+                match WiFiDirectDevice::FromIdAsync(&info.Id().unwrap())
+                    .unwrap()
+                    .await
+                {
+                    Ok(device) => {
+                        println!(
+                            "  {:?} connected: {:?}",
+                            started.elapsed(),
+                            device.ConnectionStatus()
+                        );
+                        for pair in device.GetConnectionEndpointPairs().unwrap() {
+                            println!(
+                                "  local {:?} remote {:?}",
+                                pair.LocalHostName().and_then(|h| h.CanonicalName()),
+                                pair.RemoteHostName().and_then(|h| h.CanonicalName())
+                            );
+                        }
+                        devices.push(device);
+                    }
+                    Err(e) => println!("  connect failed: {e}"),
+                }
+            }
+            println!("done; {} connected", devices.len());
+            let _ = publisher.Stop();
+        }
+
+        /// Lists the Wi-Fi Direct devices Windows knows, paired or not,
+        /// read-only: `cargo test -p beam-desktop list_wifi_direct_devices -- --ignored --nocapture`.
+        #[tokio::test]
+        #[ignore = "needs a Wi-Fi Direct capable adapter"]
+        async fn list_wifi_direct_devices() {
+            let props: Vec<HSTRING> = [
+                "System.Devices.Aep.DeviceAddress",
+                "System.Devices.Aep.IsPaired",
+            ]
+            .iter()
+            .map(|s| HSTRING::from(*s))
+            .collect();
+            let op = {
+                let iterable = IIterable::<HSTRING>::from(props.clone());
+                DeviceInformation::FindAllAsyncWithKindAqsFilterAndAdditionalProperties(
+                    &HSTRING::from(
+                        "System.Devices.Aep.ProtocolId:=\"{0407d24e-53de-4c9a-9ba1-9ced54641188}\"",
+                    ),
+                    &iterable,
+                    DeviceInformationKind::AssociationEndpoint,
+                )
+                .unwrap()
+            };
+            for info in op.await.unwrap() {
+                let get = |k: &HSTRING| {
+                    info.Properties()
+                        .and_then(|p| p.Lookup(k))
+                        .map(|v| format!("{v:?}"))
+                        .unwrap_or_default()
+                };
+                println!(
+                    "{:?} id={:?} addr={} paired={} pairing.IsPaired={:?}",
+                    info.Name(),
+                    info.Id(),
+                    get(&props[0]),
+                    get(&props[1]),
+                    info.Pairing().and_then(|p| p.IsPaired())
+                );
+            }
+        }
+
+        /// Makes Windows forget Wi-Fi Direct pairings: the one with
+        /// BEAM_FORGET_ADDRESS, or all of them:
+        /// `cargo test -p beam-desktop forget_wifi_direct_pairings -- --ignored --nocapture`.
+        #[tokio::test]
+        #[ignore = "changes this PC's Wi-Fi Direct pairings"]
+        async fn forget_wifi_direct_pairings() {
+            let address = std::env::var("BEAM_FORGET_ADDRESS")
+                .unwrap_or_default()
+                .to_lowercase();
+            let n = forget_direct_pairing(&address).await;
+            println!("forgot {n} pairing(s)");
+        }
+
         /// Phase 8 feasibility: host a Wi-Fi Direct group with a name and
         /// passphrase (what an Android phone can join without a prompt) and
         /// check this laptop stays on its Wi-Fi network meanwhile:
@@ -1182,20 +1891,6 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_hotspot_gateway_stands_in_for_an_unknown_phone_address() {
-        let ours: IpAddr = "192.168.49.23".parse().unwrap();
-        assert_eq!(
-            hotspot_target(Some("0.0.0.0:41234"), ours).unwrap(),
-            "192.168.49.1:41234".parse().unwrap()
-        );
-        assert_eq!(
-            hotspot_target(Some("192.168.49.7:41234"), ours).unwrap(),
-            "192.168.49.7:41234".parse().unwrap()
-        );
-        assert!(hotspot_target(None, ours).is_err());
-    }
 
     #[test]
     fn a_decline_explains_itself() {

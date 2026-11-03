@@ -88,6 +88,7 @@ pub(super) async fn run(
         transfer_id: plan.transfer_id,
         files: plan.files.iter().map(|f| f.entry.clone()).collect(),
         total_size: plan.total_size,
+        destination: options.destination.clone(),
     }))
     .await?;
     let mut cancel = options.cancel.clone();
@@ -190,7 +191,11 @@ pub(super) async fn run(
             history.corrupt_once.clone(),
         ));
     }
-    drop(events_tx);
+    // A fully checkpointed resume starts without streams. Its on-disk bytes
+    // can still fail the receiver's final hash, so retain a way to start one
+    // repair worker if CHUNK_RETRY arrives. Already-complete/empty transfers
+    // need no extra connection.
+    let mut has_data_stream = stream_count > 0;
 
     let mut retries: HashMap<ChunkRef, u32> = HashMap::new();
     let mut done_sent = vec![false; plan.files.len()];
@@ -271,6 +276,15 @@ pub(super) async fn run(
                         .bytes_done
                         .saturating_sub(chunk_len(plan.files[index].entry.size, retry.chunk_index));
                     queue.push_front(chunk);
+                    if !has_data_stream {
+                        let data = open_data_stream(addr, me, peer.public_key, token, plan.transfer_id, 0).await?;
+                        tasks.spawn(stream_loop(
+                            data, plan.clone(), queue.clone(), window.clone(), in_flight.clone(),
+                            events_tx.clone(), history.corrupt_once.clone(),
+                        ));
+                        has_data_stream = true;
+                        history.streams = history.streams.max(1);
+                    }
                 }
                 Frame::TransferComplete(done) if done.transfer_id == plan.transfer_id => {
                     queue.close();

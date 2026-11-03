@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use beam_core::frame::Frame;
 use beam_core::messages::*;
 use beam_core::{
-    secure_connection, send_to, Connection, Decision, Identity, LocalDevice, Role, SendEvent,
-    SendOptions, SendOutcome, TrustStore,
+    secure_connection, send_to, Connection, Decision, Identity, LocalDevice, Role, SaveFolders,
+    SendEvent, SendOptions, SendOutcome, TrustStore, Visibility, VisibilityMode,
 };
 use common::*;
 use tokio::net::{TcpListener, TcpStream};
@@ -475,6 +475,83 @@ async fn trusted_sender_with_auto_accept_skips_the_prompt() {
     ));
 }
 
+/// Sends `a.txt` asking for `destination`; returns where the receiver saved
+/// it and the folder ids the sender was offered.
+async fn send_asking_for(
+    destination: Option<&str>,
+    sender_trusted: bool,
+) -> (PathBuf, Vec<String>) {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("a.txt");
+    fs::write(&file, b"a").unwrap();
+    let (inbox, desktop) = (tmp.path().join("in"), tmp.path().join("Desktop"));
+    let sender = device("phone");
+    let receiver_device = device("laptop");
+    let trust = if sender_trusted {
+        trust_of(&[(&sender, true)])
+    } else {
+        trust_of(&[])
+    };
+    let mut receiver = TestReceiver::start_saving(
+        receiver_device.clone(),
+        trust,
+        &inbox,
+        Visibility::new(VisibilityMode::Everyone),
+        SaveFolders::new(vec![("desktop".into(), desktop.clone())]),
+        |_| Decision::Accept,
+    )
+    .await;
+    let mut offered = Vec::new();
+    let sent = send_to(
+        receiver.addr,
+        &sender,
+        &trust_of(&[]),
+        &[file],
+        &SendOptions {
+            destination: destination.map(str::to_string),
+            ..options(2)
+        },
+        |event| {
+            if let SendEvent::Connected(peer) = event {
+                offered = peer.save_to();
+            }
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(sent, SendOutcome::Completed(_)));
+    receiver.next_outcome().await;
+    let saved = [&desktop, &inbox]
+        .into_iter()
+        .find(|dir| dir.join("a.txt").exists())
+        .expect("a.txt was saved somewhere")
+        .clone();
+    // Keep the folder alive until we've looked.
+    let saved = PathBuf::from(saved.file_name().unwrap());
+    drop(tmp);
+    (saved, offered)
+}
+
+#[tokio::test]
+async fn a_trusted_sender_can_save_into_an_offered_folder() {
+    let (saved, offered) = send_asking_for(Some("desktop"), true).await;
+    assert_eq!(saved, PathBuf::from("Desktop"));
+    assert_eq!(offered, vec!["desktop".to_string()]);
+}
+
+#[tokio::test]
+async fn an_unknown_folder_falls_back_to_the_default() {
+    let (saved, _) = send_asking_for(Some("../../Windows"), true).await;
+    assert_eq!(saved, PathBuf::from("in"));
+}
+
+#[tokio::test]
+async fn an_untrusted_sender_is_offered_no_folders_and_cannot_pick_one() {
+    let (saved, offered) = send_asking_for(Some("desktop"), false).await;
+    assert_eq!(saved, PathBuf::from("in"));
+    assert!(offered.is_empty());
+}
+
 #[tokio::test]
 async fn trusted_sender_without_auto_accept_is_still_asked() {
     let tmp = tempfile::tempdir().unwrap();
@@ -758,6 +835,7 @@ impl RawSender {
                 transfer_id,
                 files: entries,
                 total_size,
+                destination: None,
             }))
             .await
             .unwrap();

@@ -66,7 +66,12 @@ class BeamApp : Application() {
             saveReceived = { paths -> saver.save(paths) },
         ).also { repo ->
             if (RadioPermissions.hasBluetoothLe(this)) {
-                repo.radio = BleRadio(this, LocalHotspot(this), WifiDirectLink(this), scope) {
+                repo.radio = BleRadio(this, LocalHotspot(this), WifiDirectLink(this) {
+                    repo.state.value.transfers.any {
+                        it.phase == dev.beam.android.model.TransferUi.Phase.WAITING ||
+                            it.phase == dev.beam.android.model.TransferUi.Phase.ACTIVE
+                    }
+                }, scope) {
                     repo.state.value.busy.any { !it.sending }
                 }
             }

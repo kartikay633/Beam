@@ -15,6 +15,7 @@ import dev.beam.core.OutgoingFile
 import dev.beam.core.ServiceAdvert
 import dev.beam.core.TransferInfo
 import dev.beam.core.TransferResult
+import dev.beam.core.TrustedDevice
 import dev.beam.core.Visibility
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -51,6 +52,7 @@ class BeamRepositoryTest {
             },
             clock = { testScheduler.currentTime },
             io = dispatcher,
+            pairingDeviceId = { "aaaa-bbbb-cccc-dddd" },
         )
     }
 
@@ -77,6 +79,43 @@ class BeamRepositoryTest {
         assertEquals("1111-2222-3333-4444", state.deviceId)
         assertEquals(Visibility.EVERYONE, state.visibility)
         assertEquals(BeamRepository.EVERYONE_FOR_MS, state.everyoneUntilMs)
+    }
+
+    @Test
+    fun failedNativeStartupClosesTheCreatedNodeAndCanRetry() = runTest(dispatcher) {
+        val nodes = mutableListOf<FakeNode>()
+        val repo = BeamRepository(this, settings,
+            createNode = { s, listener -> FakeNode(listener, s.visibility).also {
+                if (nodes.isEmpty()) it.startFailure = IllegalStateException("bind failed")
+                nodes += it
+            } }, platformDiscovery = discovery, saveReceived = { emptyList() }, io = dispatcher)
+        repo.start()
+        assertTrue(nodes.single().closed)
+        assertFalse(repo.state.value.running)
+        assertEquals("bind failed", repo.state.value.error)
+        repo.start()
+        assertTrue(repo.state.value.running)
+        repo.stop()
+    }
+
+    @Test
+    fun failedRadioStartupStopsDiscoveryAndNativeNode() = runTest(dispatcher) {
+        val repo = repository()
+        var stopped = false
+        repo.radio = object : OfflineRadio {
+            override val available = true
+            override fun start(node: BeamNodeInterface) { error("radio failed") }
+            override fun stop() { stopped = true }
+            override fun refresh() {}
+            override fun advertise(advert: BleAdvertisement?) {}
+            override suspend fun connect(device: NearbyDevice, status: (String) -> Unit): OfflineLink = error("unused")
+        }
+        repo.start()
+        assertTrue(stopped)
+        assertFalse(discovery.started)
+        assertTrue(node.closed)
+        assertTrue("stop" in node.calls)
+        assertFalse(repo.state.value.running)
     }
 
     @Test
@@ -162,7 +201,7 @@ class BeamRepositoryTest {
     fun aFailedSendShowsWhyAndCleansUp() = runTest(dispatcher) {
         val repo = repository()
         repo.start()
-        node.sendResult = { throw BeamException.Failed("\"ThinkPad\" didn't answer") }
+        node.resolveResult = { throw BeamException.Failed("\"ThinkPad\" didn't answer") }
         var cleaned = false
         val file = OutgoingFile("a.jpg", 0, FileSource.Path("/cache/a.jpg"))
         val id = repo.send(lan("aaaa-bbbb-cccc-dddd", "ThinkPad", trusted = false), listOf(file)) { cleaned = true }
@@ -197,6 +236,39 @@ class BeamRepositoryTest {
     }
 
     @Test
+    fun aPickedSaveFolderGoesWithTheSendAndIsRemembered() = runTest(dispatcher) {
+        val repo = repository()
+        repo.start()
+        node.trusted += TrustedDevice("aaaa-bbbb-cccc-dddd", "ThinkPad", true)
+        val laptop = lan("aaaa-bbbb-cccc-dddd", "ThinkPad", trusted = true)
+        node.listener.deviceFound(laptop)
+        node.listener.saveFoldersOffered("aaaa-bbbb-cccc-dddd", listOf("downloads", "desktop"))
+        assertEquals(listOf("downloads", "desktop"), repo.state.value.saveFolders["thinkpad"])
+        repo.setSaveTo(laptop, "desktop")
+        val id = repo.send(laptop, listOf(OutgoingFile("a.jpg", 0, FileSource.Path("/a")))) {}
+        advanceUntilIdle()
+        assertEquals("desktop", node.saveTo[id])
+        assertEquals(listOf("downloads", "desktop"), settings.saveFolders("thinkpad"))
+        assertEquals("desktop", settings.saveTo("thinkpad"))
+    }
+
+    @Test
+    fun aFolderThePcNoLongerOffersIsDropped() = runTest(dispatcher) {
+        val repo = repository()
+        repo.start()
+        node.trusted += TrustedDevice("aaaa-bbbb-cccc-dddd", "ThinkPad", true)
+        val laptop = lan("aaaa-bbbb-cccc-dddd", "ThinkPad", trusted = true)
+        node.listener.deviceFound(laptop)
+        node.listener.saveFoldersOffered("aaaa-bbbb-cccc-dddd", listOf("desktop"))
+        repo.setSaveTo(laptop, "desktop")
+        node.listener.saveFoldersOffered("aaaa-bbbb-cccc-dddd", listOf("downloads"))
+        assertEquals(null, repo.state.value.saveTo["thinkpad"])
+        val id = repo.send(laptop, listOf(OutgoingFile("a.jpg", 0, FileSource.Path("/a")))) {}
+        advanceUntilIdle()
+        assertEquals(null, node.saveTo[id])
+    }
+
+    @Test
     fun stoppingClearsWhatIsNoLongerTrue() = runTest(dispatcher) {
         val repo = repository()
         repo.start()
@@ -225,6 +297,19 @@ class BeamRepositoryTest {
     }
 
     @Test
+    fun pairingUsesTheOfflineRouteWhenTheLanCannotBeReached() = runTest(dispatcher) {
+        val repo = repository()
+        val radio = FakeRadio()
+        repo.radio = radio
+        repo.start()
+        node.pairResult = { throw BeamException.Failed("ThinkPad didn't answer on any of its addresses") }
+        node.routes["aaaa-bbbb-cccc-dddd"] = ble("ble-aaaabbbbcccc", "ThinkPad")
+        assertTrue(repo.pair("scanned-code").isSuccess)
+        assertTrue(radio.released)
+        assertEquals("ThinkPad", repo.state.value.trusted.single().name)
+    }
+
+    @Test
     fun aBluetoothOnlyDeviceIsReachedThroughTheRadio() = runTest(dispatcher) {
         val repo = repository()
         val radio = FakeRadio()
@@ -250,7 +335,7 @@ class BeamRepositoryTest {
         val radio = FakeRadio()
         repo.radio = radio
         repo.start()
-        node.sendResult = { throw BeamException.Failed("\"ThinkPad\" didn't answer") }
+        node.resolveResult = { throw BeamException.Failed("\"ThinkPad\" didn't answer") }
         node.routes["aaaa-bbbb-cccc-dddd"] = ble("ble-aaaabbbbcccc", "ThinkPad")
         val file = OutgoingFile("a.jpg", 0, FileSource.Path("/cache/a.jpg"))
         repo.send(lan("aaaa-bbbb-cccc-dddd", "ThinkPad", trusted = false), listOf(file)) {}
@@ -259,6 +344,21 @@ class BeamRepositoryTest {
         assertEquals("192.168.43.20:9000", node.sent.last().first)
         assertTrue(radio.released)
         assertTrue(repo.state.value.transfers.none { it.phase == Phase.FAILED })
+    }
+
+    @Test
+    fun aLanFallbackDoesNotHandTheSameDescriptorToRustTwice() = runTest(dispatcher) {
+        val repo = repository()
+        val radio = FakeRadio()
+        repo.radio = radio
+        repo.start()
+        node.resolveResult = { throw BeamException.Failed("LAN didn't answer") }
+        node.routes["aaaa-bbbb-cccc-dddd"] = ble("ble-aaaabbbbcccc", "ThinkPad")
+        repo.send(lan("aaaa-bbbb-cccc-dddd", "ThinkPad", false),
+            listOf(OutgoingFile("photo.jpg", 0, FileSource.Fd(7)))) {}
+        advanceUntilIdle()
+        assertEquals("Only the chosen route may take ownership of the descriptor", 1, node.sent.size)
+        assertTrue(radio.released)
     }
 
     @Test
@@ -274,6 +374,23 @@ class BeamRepositoryTest {
         advanceUntilIdle()
         assertEquals(Phase.CANCELLED, repo.state.value.transfers.single().phase)
         assertTrue(node.sent.isEmpty())
+        assertTrue("cancel must also reach a native send racing with setup", "cancel $id" in node.calls)
+    }
+
+    @Test
+    fun cancellingBeforeSetupStartsStillClosesUnsentFiles() = runTest(dispatcher) {
+        val repo = repository()
+        repo.start()
+        var closed = 0
+        var cleaned = 0
+        val id = repo.send(lan("aaaa-bbbb-cccc-dddd", "ThinkPad", false),
+            listOf(OutgoingFile("a.jpg", 0, FileSource.Fd(7))),
+            onUnsent = { closed++ }, cleanup = { cleaned++ })
+        repo.cancel(id)
+        advanceUntilIdle()
+        assertTrue(node.sent.isEmpty())
+        assertEquals(1, closed)
+        assertEquals(1, cleaned)
     }
 
     @Test

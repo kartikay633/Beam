@@ -42,6 +42,9 @@ pub struct SendOptions {
     /// Set to `true` to cancel the transfer: the receiver is told (CANCEL)
     /// and `send_to` returns [`TransferError::CancelledByUser`].
     pub cancel: Option<watch::Receiver<bool>>,
+    /// The receiver's folder id to save into (one of
+    /// [`PeerInfo::save_to`]); `None` for its default folder.
+    pub destination: Option<String>,
     /// Test hook: flip one byte in the first transmission of this
     /// `(file_id, chunk_index)` so the receiver's check fails once.
     #[doc(hidden)]
@@ -55,6 +58,7 @@ impl Default for SendOptions {
             reconnect_window: Duration::from_secs(60),
             expect_device: None,
             cancel: None,
+            destination: None,
             corrupt_once: None,
         }
     }
@@ -494,5 +498,101 @@ mod tests {
         assert_eq!(backoff(3), Duration::from_millis(400));
         assert_eq!(backoff(5), Duration::from_millis(1600));
         assert_eq!(backoff(100), Duration::from_millis(1600));
+    }
+
+    #[tokio::test]
+    async fn fully_checkpointed_resume_repairs_corrupt_disk_bytes() {
+        use crate::{
+            BoxFuture, Decision, DeviceType, Identity, IncomingOffer, PairingWindow,
+            ReceiveHandler, Receiver, ReceiverConfig, Visibility, VisibilityMode,
+        };
+        struct ResumeOnly;
+        impl ReceiveHandler for ResumeOnly {
+            fn decide(&self, _: IncomingOffer) -> BoxFuture<Decision> {
+                panic!("matching saved transfer should resume without another approval")
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("proof.bin");
+        let original = vec![42u8; 65536];
+        std::fs::write(&source, &original).unwrap();
+        let files = describe_files(vec![SendSource::path(source)])
+            .await
+            .unwrap();
+        let plan = Arc::new(TransferPlan {
+            transfer_id: Uuid::new_v4(),
+            total_size: original.len() as u64,
+            files,
+        });
+        let me = LocalDevice {
+            identity: Identity::generate(),
+            name: "sender".into(),
+            device_type: DeviceType::Laptop,
+        };
+        let inbox = tmp.path().join("inbox");
+        std::fs::create_dir_all(inbox.join(".beam-partial")).unwrap();
+        std::fs::write(
+            inbox.join("proof.bin.beam-part"),
+            vec![99u8; original.len()],
+        )
+        .unwrap();
+        let entry = &plan.files[0].entry;
+        let manifest = serde_json::json!({
+            "version": 1, "transfer_id": plan.transfer_id,
+            "sender_key": hex::encode(me.identity.public_key()),
+            "updated_unix": crate::receiver::now_unix(),
+            "files": [{ "file_id": entry.file_id, "name": entry.name, "size": entry.size,
+                "modified_unix": entry.modified_unix, "final_name": "proof.bin",
+                "chunk_bitmap": "01", "done_blake3": null }]
+        });
+        std::fs::write(
+            inbox
+                .join(".beam-partial")
+                .join(format!("{}.json", plan.transfer_id)),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let receiver = Receiver::bind(
+            "127.0.0.1:0",
+            ReceiverConfig {
+                device: LocalDevice {
+                    identity: Identity::generate(),
+                    name: "receiver".into(),
+                    device_type: DeviceType::Laptop,
+                },
+                download_dir: inbox.clone(),
+                save_folders: Default::default(),
+                trust: TrustStore::in_memory(),
+                visibility: Visibility::new(VisibilityMode::Everyone),
+                pairing: PairingWindow::default(),
+            },
+        )
+        .await
+        .unwrap();
+        let addr = receiver.local_addr().unwrap();
+        let receiving = tokio::spawn(receiver.run(ResumeOnly));
+        let hashes = FullHashes::spawn(&plan);
+        let mut history = SessionHistory::default();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            session::run(
+                addr,
+                &me,
+                &TrustStore::in_memory(),
+                &plan,
+                &hashes,
+                &SendOptions::default(),
+                &mut history,
+                &mut |_| {},
+            ),
+        )
+        .await;
+        receiving.abort();
+        assert!(
+            matches!(result, Ok(Ok(session::SessionEnd::Completed))),
+            "fully checkpointed repair must finish instead of pinging forever"
+        );
+        assert_eq!(std::fs::read(inbox.join("proof.bin")).unwrap(), original);
+        assert_eq!(history.resent_chunks, 1);
     }
 }

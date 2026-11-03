@@ -10,6 +10,8 @@ node_modules/
 dist/
 dist-ssr/
 .vite/
+playwright-report/
+test-results/
 *.local
 npm-debug.log*
 yarn-debug.log*

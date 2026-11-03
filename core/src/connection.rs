@@ -321,6 +321,7 @@ mod tests {
                 })
                 .collect(),
             total_size: 3_000_000 * files as u64,
+            destination: None,
         })
     }
 

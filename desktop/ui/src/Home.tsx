@@ -2,9 +2,9 @@ import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api, isTauri, type Device, type Snapshot } from "./api";
-import { Transfers } from "./Transfers";
+import { TransferList } from "./Transfers";
 import { formatBytes } from "./format";
-import { BluetoothIcon, CloseIcon, DeviceIcon, FileIcon, LaptopIcon, PhoneIcon, PlusIcon, UploadIcon } from "./icons";
+import { ArrowUpIcon, BluetoothIcon, CloseIcon, DeviceIcon, FileGlyph, LaptopIcon, PhoneIcon, PlusIcon } from "./icons";
 
 export function Home({ snapshot }: { snapshot: Snapshot }) {
   const [error, setError] = useState<string | null>(null);
@@ -37,7 +37,7 @@ export function Home({ snapshot }: { snapshot: Snapshot }) {
     <div className="page">
       {dragging && (
         <div className="drop-overlay" aria-hidden="true">
-          <UploadIcon size={28} />
+          <ArrowUpIcon size={28} />
           <span>Drop to add files</span>
         </div>
       )}
@@ -59,7 +59,7 @@ export function Home({ snapshot }: { snapshot: Snapshot }) {
       )}
       <SendPanel snapshot={snapshot} onChoose={choose} />
       <NearbyDevices snapshot={snapshot} onSend={sendTo} />
-      <Transfers transfers={snapshot.transfers} />
+      <TransferList transfers={snapshot.transfers} />
       <p className="footnote">
         Received files go to <span className="path">{snapshot.settings.downloadDir}</span> ·{" "}
         <button className="text-button" onClick={() => api.openFolder()}>
@@ -97,7 +97,7 @@ function SendPanel({ snapshot, onChoose }: { snapshot: Snapshot; onChoose: () =>
     return (
       <section className="send-strip" aria-label="Send files">
         <div className="tile">
-          <UploadIcon size={20} />
+          <ArrowUpIcon size={20} />
         </div>
         <div className="grow">
           <p className="strong">Drop files anywhere to send</p>
@@ -129,7 +129,7 @@ function SendPanel({ snapshot, onChoose }: { snapshot: Snapshot; onChoose: () =>
       <ul className="file-chips">
         {staged.map((file) => (
           <li key={file.path} title={file.path}>
-            <FileIcon size={15} />
+            <FileGlyph name={file.name} size={15} />
             <span className="ellipsis">{file.name}</span>
             <span className="secondary">{formatBytes(file.size)}</span>
             <button className="chip-remove" aria-label={`Remove ${file.name}`} onClick={() => api.unstage(file.path)}>
@@ -175,6 +175,7 @@ function NearbyDevices({ snapshot, onSend }: { snapshot: Snapshot; onSend: (targ
       </div>
       {byAddress ? (
         <form
+          noValidate
           className="address-form"
           onSubmit={(e) => {
             e.preventDefault();

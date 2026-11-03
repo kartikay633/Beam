@@ -18,6 +18,28 @@ pub struct Settings {
     /// Keep a "Beam" entry in Explorer's Send To menu.
     pub send_to_shortcut: bool,
     pub start_with_windows: bool,
+    /// The first-run question about staying ready in the background has
+    /// been answered (either way), so it isn't asked again.
+    pub asked_background: bool,
+    /// Folders trusted devices may choose to save into, by id: "downloads",
+    /// "desktop", "documents", "pictures", "videos". The Beam folder is
+    /// always allowed.
+    pub save_folders: Vec<String>,
+}
+
+/// The folders a phone can pick, with their Windows locations.
+pub const SAVE_FOLDER_IDS: [&str; 5] = ["downloads", "desktop", "documents", "pictures", "videos"];
+
+/// Where folder `id` is on this PC.
+pub fn save_folder_path(id: &str) -> Option<PathBuf> {
+    match id {
+        "downloads" => dirs::download_dir(),
+        "desktop" => dirs::desktop_dir(),
+        "documents" => dirs::document_dir(),
+        "pictures" => dirs::picture_dir(),
+        "videos" => dirs::video_dir(),
+        _ => None,
+    }
 }
 
 impl Default for Settings {
@@ -34,11 +56,21 @@ impl Default for Settings {
             visibility: "everyone".to_string(),
             send_to_shortcut: true,
             start_with_windows: false,
+            asked_background: false,
+            save_folders: SAVE_FOLDER_IDS.iter().map(|id| id.to_string()).collect(),
         }
     }
 }
 
 impl Settings {
+    /// The allowed folders that exist on this PC, for the receiver.
+    pub fn save_folder_paths(&self) -> Vec<(String, PathBuf)> {
+        self.save_folders
+            .iter()
+            .filter_map(|id| Some((id.clone(), save_folder_path(id)?)))
+            .collect()
+    }
+
     /// Loads settings; a missing or unreadable file gives the defaults.
     pub fn load(path: &Path) -> Settings {
         std::fs::read(path)
@@ -60,6 +92,44 @@ impl Settings {
         std::fs::rename(&tmp, path)
     }
 
+    /// Commit only after both operating-system integrations succeed. Restore
+    /// attempted changes if an integration or the atomic settings save fails.
+    pub fn apply(
+        &self,
+        old: &Settings,
+        path: &Path,
+        mut shortcut: impl FnMut(bool) -> Result<(), String>,
+        mut autostart: impl FnMut(bool) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let (mut shortcut_attempted, mut autostart_attempted) = (false, false);
+        let result = (|| {
+            if self.send_to_shortcut != old.send_to_shortcut {
+                shortcut_attempted = true;
+                shortcut(self.send_to_shortcut)?;
+            }
+            if self.start_with_windows != old.start_with_windows {
+                autostart_attempted = true;
+                autostart(self.start_with_windows)?;
+            }
+            self.save(path)
+                .map_err(|e| format!("could not save settings: {e}"))
+        })();
+        if let Err(mut error) = result {
+            if autostart_attempted {
+                if let Err(restore) = autostart(old.start_with_windows) {
+                    error.push_str(&format!("; could not restore startup setting: {restore}"));
+                }
+            }
+            if shortcut_attempted {
+                if let Err(restore) = shortcut(old.send_to_shortcut) {
+                    error.push_str(&format!("; could not restore Send To shortcut: {restore}"));
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Clamps values a hand-edited file could get wrong.
     pub fn sanitized(mut self) -> Settings {
         self.streams = self.streams.clamp(1, 16);
@@ -72,6 +142,9 @@ impl Settings {
         if !matches!(self.visibility.as_str(), "everyone" | "trusted" | "off") {
             self.visibility = "everyone".to_string();
         }
+        self.save_folders
+            .retain(|id| SAVE_FOLDER_IDS.contains(&id.as_str()));
+        self.save_folders.dedup();
         self
     }
 }
@@ -115,5 +188,74 @@ mod tests {
         let parsed: Settings = serde_json::from_str(r#"{"streams": 2, "future": true}"#).unwrap();
         assert_eq!(parsed.streams, 2);
         assert_eq!(parsed.visibility, "everyone");
+    }
+
+    #[test]
+    fn failed_integration_preserves_settings_and_restores_the_shortcut() {
+        let dir =
+            std::env::temp_dir().join(format!("beam-settings-failure-{}", std::process::id()));
+        let path = dir.join("settings.json");
+        let old = Settings::default();
+        old.save(&path).unwrap();
+        let new = Settings {
+            send_to_shortcut: false,
+            start_with_windows: true,
+            ..old.clone()
+        };
+        let mut shortcut = true;
+        let result = new.apply(
+            &old,
+            &path,
+            |on| {
+                shortcut = on;
+                Ok(())
+            },
+            |on| {
+                if on {
+                    Err("autostart unavailable".into())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(result.unwrap_err().contains("autostart unavailable"));
+        assert_eq!(Settings::load(&path), old);
+        assert!(shortcut);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_persistence_restores_operating_system_integrations() {
+        let dir = std::env::temp_dir().join(format!(
+            "beam-settings-write-failure-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A directory at the destination makes the final atomic rename fail.
+        let old = Settings::default();
+        let new = Settings {
+            send_to_shortcut: false,
+            start_with_windows: true,
+            ..old.clone()
+        };
+        let (mut shortcut, mut autostart) = (true, false);
+        assert!(new
+            .apply(
+                &old,
+                &dir,
+                |on| {
+                    shortcut = on;
+                    Ok(())
+                },
+                |on| {
+                    autostart = on;
+                    Ok(())
+                }
+            )
+            .is_err());
+        assert!(shortcut);
+        assert!(!autostart);
+        let _ = std::fs::remove_file(dir.with_extension("json.tmp"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

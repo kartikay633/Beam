@@ -21,7 +21,7 @@ mod ble;
 
 pub use ble::{
     ble_shared_lan, ble_uuids, parse_ble_hello, BleAdvertisement, BleCapabilities,
-    BleClientSession, BleConnectRequest, BleConnectResponse, BleDeviceInfo, BleDirectGroup,
+    BleClientSession, BleConnectRequest, BleConnectResponse, BleDeviceInfo, BleDirectPeer,
     BleHello, BleLink, BleServerSession, BleUuids, HotspotCredentials,
 };
 
@@ -253,6 +253,14 @@ pub struct OutgoingFile {
     pub source: FileSource,
 }
 
+/// A reachable destination, resolved before taking ownership of file descriptors.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ResolvedTarget {
+    pub address: String,
+    pub device_id: Option<String>,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct PairingCodeInfo {
     pub device_id: String,
@@ -286,6 +294,10 @@ pub trait BeamListener: Send + Sync {
         message: Option<String>,
         saved_files: Vec<String>,
     );
+    /// A trusted device we're sending to listed the folders it lets us
+    /// pick (for `set_save_to`), such as "desktop" or "documents"; empty
+    /// when it offers none. Remember them for next time.
+    fn save_folders_offered(&self, device_id: String, folders: Vec<String>);
     /// A device that scanned our pairing code is now trusted.
     fn paired(&self, device: TrustedDevice);
     /// With [`Discovery::Platform`]: what to register now (replacing any
@@ -342,6 +354,8 @@ struct Inner {
     streams: Mutex<usize>,
     offers: Mutex<HashMap<String, PendingOffer>>,
     sends: Mutex<HashMap<String, watch::Sender<bool>>>,
+    /// Folder ids chosen for upcoming sends, by transfer id.
+    save_to: Mutex<HashMap<String, String>>,
     nearby: Mutex<HashMap<DeviceId, beam_core::NearbyDevice>>,
     /// Platform service name → the device it announced.
     services: Mutex<HashMap<String, DeviceId>>,
@@ -366,6 +380,39 @@ struct Running {
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Dropping an FFI future must also stop the task on the node's runtime.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn join_owned<T>(task: tokio::task::JoinHandle<T>) -> Result<T, BeamError> {
+    let mut task = AbortOnDrop(task);
+    (&mut task.0).await.map_err(failed)
+}
+
+struct SendRegistration<'a> {
+    sends: &'a Mutex<HashMap<String, watch::Sender<bool>>>,
+    id: &'a str,
+}
+
+impl Drop for SendRegistration<'_> {
+    fn drop(&mut self) {
+        lock(self.sends).remove(self.id);
+    }
+}
+
+fn open_sources(files: Vec<OutgoingFile>) -> Result<(Vec<String>, Vec<SendSource>), BeamError> {
+    let names = files.iter().map(|f| f.name.clone()).collect();
+    // Take ownership of every descriptor before any fallible validation or
+    // suspension, including when another file fails to open.
+    let opened: Vec<_> = files.into_iter().map(open_source).collect();
+    Ok((names, opened.into_iter().collect::<Result<_, _>>()?))
 }
 
 #[uniffi::export]
@@ -410,6 +457,7 @@ impl BeamNode {
                 streams: Mutex::new(4),
                 offers: Mutex::default(),
                 sends: Mutex::default(),
+                save_to: Mutex::default(),
                 nearby: Mutex::default(),
                 services: Mutex::default(),
                 ble_devices: Mutex::default(),
@@ -576,6 +624,17 @@ impl BeamNode {
         self.inner.visibility.set(visibility.into());
     }
 
+    /// Asks the receiver of transfer `transfer_id` (not yet started) to save
+    /// into its folder `folder`, one it offered through
+    /// `save_folders_offered`. Without this, files go to its default folder.
+    pub fn set_save_to(&self, transfer_id: String, folder: Option<String>) {
+        let mut save_to = lock(&self.inner.save_to);
+        match folder {
+            Some(folder) => save_to.insert(transfer_id, folder),
+            None => save_to.remove(&transfer_id),
+        };
+    }
+
     /// Parallel connections for sending (1–16).
     pub fn set_streams(&self, streams: u32) {
         *lock(&self.inner.streams) = (streams as usize).clamp(1, 16);
@@ -610,20 +669,38 @@ impl BeamNode {
         Ok(())
     }
 
-    /// Sends files to `target`: a device id from `device_found`, or an
-    /// `ip:port` address. Pick `transfer_id` yourself (a UUID); events and
-    /// `cancel` use it. Returns when the transfer ends.
+    /// Resolves a destination without taking ownership of any files.
+    pub async fn resolve_target(&self, target: String) -> Result<ResolvedTarget, BeamError> {
+        let inner = self.inner.clone();
+        self.runtime
+            .spawn(async move {
+                let (address, device_id, name) = inner.resolve(&target).await?;
+                Ok(ResolvedTarget {
+                    address: address.to_string(),
+                    device_id: device_id.map(|id| id.to_string()),
+                    name,
+                })
+            })
+            .await
+            .map_err(failed)?
+    }
+
+    /// Sends files to a discovered device or an explicit address, taking
+    /// ownership of all supplied descriptors, including on failure.
     pub async fn send(
         &self,
         transfer_id: String,
         target: String,
         files: Vec<OutgoingFile>,
     ) -> Result<TransferResult, BeamError> {
+        let (names, sources) = open_sources(files)?;
         let inner = self.inner.clone();
-        self.runtime
-            .spawn(async move { inner.send(transfer_id, Target::Find(target), files).await })
-            .await
-            .map_err(failed)?
+        join_owned(self.runtime.spawn(async move {
+            inner
+                .send(transfer_id, Target::Find(target), names, sources)
+                .await
+        }))
+        .await?
     }
 
     /// Sends to an `ip:port` reached some other way (after a Bluetooth
@@ -636,6 +713,7 @@ impl BeamNode {
         peer_name: String,
         files: Vec<OutgoingFile>,
     ) -> Result<TransferResult, BeamError> {
+        let (names, sources) = open_sources(files)?;
         let addr = address
             .parse()
             .map_err(|_| failed(format!("{address:?} is not an address")))?;
@@ -644,17 +722,15 @@ impl BeamNode {
             _ => None,
         };
         let inner = self.inner.clone();
-        self.runtime
-            .spawn(async move {
-                let target = Target::At {
-                    addr,
-                    expect,
-                    name: peer_name,
-                };
-                inner.send(transfer_id, target, files).await
-            })
-            .await
-            .map_err(failed)?
+        join_owned(self.runtime.spawn(async move {
+            let target = Target::At {
+                addr,
+                expect,
+                name: peer_name,
+            };
+            inner.send(transfer_id, target, names, sources).await
+        }))
+        .await?
     }
 
     /// Cancels a transfer in either direction.
@@ -713,6 +789,24 @@ impl BeamNode {
             .await
             .map_err(failed)?
     }
+
+    /// Pairs over a link negotiated after the QR code was displayed. The
+    /// QR's pinned public key and one-time token remain authoritative.
+    pub async fn pair_at(&self, code: String, address: String) -> Result<TrustedDevice, BeamError> {
+        let address = address.parse::<std::net::SocketAddr>().map_err(failed)?;
+        let mut code = PairingCode::parse(code.trim()).map_err(failed)?;
+        code.addresses = vec![address];
+        let inner = self.inner.clone();
+        self.runtime
+            .spawn(async move {
+                pair_with(&code, &inner.device, &inner.trust)
+                    .await
+                    .map(TrustedDevice::from)
+                    .map_err(failed)
+            })
+            .await
+            .map_err(failed)?
+    }
 }
 
 impl Inner {
@@ -721,6 +815,7 @@ impl Inner {
         let config = ReceiverConfig {
             device: self.device.clone(),
             download_dir: self.incoming_dir.clone(),
+            save_folders: Default::default(),
             trust: self.trust.clone(),
             visibility: self.visibility.clone(),
             pairing: self.pairing.clone(),
@@ -826,19 +921,19 @@ impl Inner {
         self: Arc<Self>,
         transfer_id: String,
         target: Target,
-        files: Vec<OutgoingFile>,
+        file_names: Vec<String>,
+        sources: Vec<SendSource>,
     ) -> Result<TransferResult, BeamError> {
-        let file_names: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
-        // Open every file before giving up on any, so each descriptor the
-        // app handed over is owned (and closed) even when one fails.
-        let opened: Vec<_> = files.into_iter().map(open_source).collect();
-        let sources = opened.into_iter().collect::<Result<Vec<_>, _>>()?;
         let (addr, expect_device, peer_name) = match target {
             Target::Find(target) => self.resolve(&target).await?,
             Target::At { addr, expect, name } => (addr, expect, name),
         };
         let (cancel_tx, cancel_rx) = watch::channel(false);
         lock(&self.sends).insert(transfer_id.clone(), cancel_tx);
+        let registration = SendRegistration {
+            sends: &self.sends,
+            id: &transfer_id,
+        };
 
         self.listener.transfer_started(TransferInfo {
             transfer_id: transfer_id.clone(),
@@ -854,6 +949,7 @@ impl Inner {
             streams: *lock(&self.streams),
             expect_device,
             cancel: Some(cancel_rx),
+            destination: lock(&self.save_to).remove(&transfer_id),
             ..SendOptions::default()
         };
         let listener = self.listener.clone();
@@ -865,11 +961,16 @@ impl Inner {
             sources,
             &options,
             |event| match event {
-                SendEvent::Connected(peer) => listener.transfer_status(
-                    id.clone(),
-                    format!("Waiting for {} to accept…", peer.name()),
-                    Some(peer.verification_code.clone()),
-                ),
+                SendEvent::Connected(peer) => {
+                    if peer.is_trusted() {
+                        listener.save_folders_offered(peer.device_id().to_string(), peer.save_to());
+                    }
+                    listener.transfer_status(
+                        id.clone(),
+                        format!("Waiting for {} to accept…", peer.name()),
+                        Some(peer.verification_code.clone()),
+                    )
+                }
                 SendEvent::Accepted { .. } => {
                     listener.transfer_status(id.clone(), "Sending…".into(), None)
                 }
@@ -886,7 +987,7 @@ impl Inner {
             },
         )
         .await;
-        lock(&self.sends).remove(&transfer_id);
+        drop(registration);
 
         let (outcome, message) = match result {
             Ok(SendOutcome::Completed(_)) => (TransferResult::Completed, None),

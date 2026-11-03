@@ -9,15 +9,20 @@ import dev.beam.core.BleConnectRequest
 import dev.beam.core.BleServerSession
 import dev.beam.core.NearbyDevice
 import dev.beam.core.OutgoingFile
+import dev.beam.core.ResolvedTarget
 import dev.beam.core.TransferResult
 import dev.beam.core.TrustedDevice
 import dev.beam.core.Visibility
 
 /** Stands in for the Rust node: records calls, and lets tests fire listener events. */
-class FakeNode(val listener: BeamListener, var mode: Visibility) : BeamNodeInterface {
+class FakeNode(val listener: BeamListener, var mode: Visibility) : BeamNodeInterface, AutoCloseable {
     val calls = mutableListOf<String>()
+    var startFailure: Exception? = null
+    var closed = false
+    override fun close() { closed = true }
     var trusted = mutableListOf<TrustedDevice>()
     var sendResult: () -> TransferResult = { TransferResult.COMPLETED }
+    var resolveResult: () -> ResolvedTarget = { ResolvedTarget("192.168.1.20:9000", "aaaa-bbbb-cccc-dddd", "ThinkPad") }
     var pairResult: () -> TrustedDevice = { TrustedDevice("aaaa-bbbb-cccc-dddd", "ThinkPad", true) }
     val sent = mutableListOf<Pair<String, List<OutgoingFile>>>()
     var lan = emptyList<String>()
@@ -38,6 +43,11 @@ class FakeNode(val listener: BeamListener, var mode: Visibility) : BeamNodeInter
         return pairResult().also { trusted += it }
     }
 
+    override suspend fun pairAt(code: String, address: String): TrustedDevice {
+        calls += "pair at $address"
+        return TrustedDevice("aaaa-bbbb-cccc-dddd", "ThinkPad", true).also { trusted += it }
+    }
+
     override fun removeTrusted(deviceId: String) {
         trusted.removeAll { it.deviceId == deviceId }
     }
@@ -50,6 +60,8 @@ class FakeNode(val listener: BeamListener, var mode: Visibility) : BeamNodeInter
         sent += target to files
         return sendResult()
     }
+
+    override suspend fun resolveTarget(target: String): ResolvedTarget = resolveResult()
 
     override fun serviceFound(serviceName: String, txt: Map<String, String>, addresses: List<String>, port: UShort) {
         calls += "found $serviceName"
@@ -65,6 +77,11 @@ class FakeNode(val listener: BeamListener, var mode: Visibility) : BeamNodeInter
         trusted[i] = trusted[i].copy(autoAccept = autoAccept)
     }
 
+    val saveTo = mutableMapOf<String, String?>()
+    override fun setSaveTo(transferId: String, folder: String?) {
+        saveTo[transferId] = folder
+    }
+
     override fun setStreams(streams: UInt) {
         calls += "streams $streams"
     }
@@ -75,6 +92,7 @@ class FakeNode(val listener: BeamListener, var mode: Visibility) : BeamNodeInter
 
     override fun start(): UShort {
         calls += "start"
+        startFailure?.let { throw it }
         return 40000u
     }
 
