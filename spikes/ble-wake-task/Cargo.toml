@@ -1,0 +1,27 @@
+[package]
+name = "beam-wake-task"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Stage 3 spike: the Bluetooth-triggered background task, as a WinRT component hosted by Windows."
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+windows-core = "0.62.2"
+windows = { version = "0.62.2", features = [
+    "ApplicationModel",
+    "ApplicationModel_Background",
+    "Devices_Bluetooth_Advertisement",
+    "Devices_Bluetooth_Background",
+    "Foundation",
+    "Foundation_Collections",
+    "Storage",
+    "Storage_FileProperties",
+    "Storage_Search",
+    "Storage_Streams",
+    "Win32_System_WinRT",
+] }

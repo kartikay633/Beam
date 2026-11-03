@@ -117,6 +117,8 @@ This is simpler than the design above:
   has learned that PC's list, so from the second send onward. The choice is
   remembered per PC.
 
+**Spike result (2026-11-03):** it works with a WinRT task hosted by Windows; a COM task is refused for Bluetooth triggers. See [STAGE3-SPIKE.md](STAGE3-SPIKE.md).
+
 ## Stage 3: wake Beam when it isn't running (research spike first)
 
 Beam ships through the Microsoft Store (MSIX), so it has package identity.

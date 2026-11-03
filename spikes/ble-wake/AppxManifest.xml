@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Loose-file package for the Stage 3 spike; register with
+     Add-AppxPackage -Register (Developer Mode). Not shipped. -->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  IgnorableNamespaces="uap rescap com desktop">
+
+  <Identity Name="dev.beam.WakeSpike" Publisher="CN=kartikay633" Version="0.1.1.0" ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Beam wake spike</DisplayName>
+    <PublisherDisplayName>kartikay633</PublisherDisplayName>
+    <Logo>logo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="App" Executable="beam-wake-spike.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="Beam wake spike" Description="Stage 3 spike"
+        BackgroundColor="transparent" Square150x150Logo="logo.png" Square44x44Logo="logo.png" />
+      <Extensions>
+        <Extension Category="windows.backgroundTasks" EntryPoint="BeamWake.Task">
+          <BackgroundTasks>
+            <Task Type="bluetooth" />
+          </BackgroundTasks>
+        </Extension>
+        <desktop:Extension Category="windows.fullTrustProcess" Executable="beam-wake-spike.exe" />
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:ExeServer Executable="beam-wake-spike.exe" Arguments="-RegisterProcessAsComServer" DisplayName="Beam wake spike">
+              <com:Class Id="6F1D2A4E-8C3B-4E7A-9D55-2B7E1C9A4F10" DisplayName="Beam wake task" />
+            </com:ExeServer>
+          </com:ComServer>
+        </com:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Extensions>
+    <Extension Category="windows.activatableClass.inProcessServer">
+      <InProcessServer>
+        <Path>beam_wake_task.dll</Path>
+        <ActivatableClass ActivatableClassId="BeamWake.Task" ThreadingModel="both" />
+      </InProcessServer>
+    </Extension>
+  </Extensions>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <DeviceCapability Name="bluetooth" />
+  </Capabilities>
+</Package>
