@@ -961,6 +961,10 @@ section > .text-button.subtle {
 .save-folders .checks { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 8px; }
 .save-folders .check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
 .save-folders .check input { margin: 0; }
+.save-folders .pinned { list-style: none; margin: 10px 0 0; padding: 0; border-top: 1px solid var(--divider); }
+.save-folders .pinned li { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--divider); }
+.save-folders .pinned .ellipsis { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.save-folders > div:last-child { margin-top: 10px; }
 .ready-prompt { display: flex; align-items: center; gap: 16px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); }
 .ready-prompt p { margin: 2px 0 0; }
 .ready-actions { display: flex; gap: 8px; flex: none; }

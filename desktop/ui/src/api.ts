@@ -81,6 +81,8 @@ export interface Settings {
   askedBackground: boolean;
   /** Folders trusted devices may choose to save into. */
   saveFolders: SaveFolderId[];
+  /** Other folders trusted devices may save into. */
+  pinnedFolders: string[];
 }
 
 export type SaveFolderId = "downloads" | "desktop" | "documents" | "pictures" | "videos";
@@ -182,6 +184,7 @@ const demo: Snapshot = {
     deviceName: "KARTIKAY-PC", downloadDir: "C:\\Users\\you\\Downloads\\Beam", streams: 4,
     visibility: "everyone", sendToShortcut: true, startWithWindows: false, askedBackground: false,
     saveFolders: ["downloads", "desktop", "documents", "pictures", "videos"],
+    pinnedFolders: [],
   },
   bluetoothProblem: null,
   notice: null,

@@ -25,7 +25,13 @@ pub struct Settings {
     /// "desktop", "documents", "pictures", "videos". The Beam folder is
     /// always allowed.
     pub save_folders: Vec<String>,
+    /// Any other folders trusted devices may save into, offered by their
+    /// name as `pin:<name>` (for example `pin:Projects`).
+    pub pinned_folders: Vec<PathBuf>,
 }
+
+/// Folder ids for pinned folders start with this; the rest is the name shown.
+pub const PINNED_PREFIX: &str = "pin:";
 
 /// The folders a phone can pick, with their Windows locations.
 pub const SAVE_FOLDER_IDS: [&str; 5] = ["downloads", "desktop", "documents", "pictures", "videos"];
@@ -58,6 +64,7 @@ impl Default for Settings {
             start_with_windows: false,
             asked_background: false,
             save_folders: SAVE_FOLDER_IDS.iter().map(|id| id.to_string()).collect(),
+            pinned_folders: Vec::new(),
         }
     }
 }
@@ -65,10 +72,26 @@ impl Default for Settings {
 impl Settings {
     /// The allowed folders that exist on this PC, for the receiver.
     pub fn save_folder_paths(&self) -> Vec<(String, PathBuf)> {
-        self.save_folders
+        let mut folders: Vec<(String, PathBuf)> = self
+            .save_folders
             .iter()
             .filter_map(|id| Some((id.clone(), save_folder_path(id)?)))
-            .collect()
+            .collect();
+        for dir in self.pinned_folders.iter().filter(|dir| dir.is_dir()) {
+            let name = dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| dir.display().to_string());
+            // Two pinned folders with the same name: "Photos", "Photos 2".
+            let mut id = format!("{PINNED_PREFIX}{name}");
+            let mut n = 2;
+            while folders.iter().any(|(known, _)| known == &id) {
+                id = format!("{PINNED_PREFIX}{name} {n}");
+                n += 1;
+            }
+            folders.push((id, dir.clone()));
+        }
+        folders
     }
 
     /// Loads settings; a missing or unreadable file gives the defaults.
@@ -145,6 +168,8 @@ impl Settings {
         self.save_folders
             .retain(|id| SAVE_FOLDER_IDS.contains(&id.as_str()));
         self.save_folders.dedup();
+        self.pinned_folders.retain(|dir| dir.is_absolute());
+        self.pinned_folders.dedup();
         self
     }
 }
@@ -152,6 +177,40 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pinned_folders_are_offered_by_name_and_kept_apart() {
+        let tmp = std::env::temp_dir().join(format!("beam-pinned-{}", std::process::id()));
+        let (a, b) = (
+            tmp.join("one").join("Photos"),
+            tmp.join("two").join("Photos"),
+        );
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let settings = Settings {
+            save_folders: vec![],
+            pinned_folders: vec![a.clone(), b.clone(), tmp.join("missing")],
+            ..Settings::default()
+        };
+        assert_eq!(
+            settings.save_folder_paths(),
+            vec![
+                ("pin:Photos".to_string(), a),
+                ("pin:Photos 2".to_string(), b)
+            ]
+        );
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn relative_pinned_folders_are_dropped() {
+        let settings = Settings {
+            pinned_folders: vec![PathBuf::from("relative"), PathBuf::from(r"C:\Work")],
+            ..Settings::default()
+        }
+        .sanitized();
+        assert_eq!(settings.pinned_folders, vec![PathBuf::from(r"C:\Work")]);
+    }
 
     #[test]
     fn settings_round_trip_and_default_when_missing() {

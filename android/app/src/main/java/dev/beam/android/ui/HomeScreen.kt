@@ -276,12 +276,14 @@ private fun SaveToChoice(folders: List<String>, chosen: String?, onChoose: (Stri
 }
 
 /** A PC folder id as people say it; null is the PC's own Beam folder. */
-private fun folderLabel(id: String?) = when (id) {
-    null -> "Beam folder"
-    "downloads" -> "Downloads"
-    "desktop" -> "Desktop"
-    "documents" -> "Documents"
-    "pictures" -> "Pictures"
-    "videos" -> "Videos"
+internal fun folderLabel(id: String?) = when {
+    id == null -> "Beam folder"
+    // A folder the PC's owner pinned: "pin:Projects".
+    id.startsWith("pin:") -> id.removePrefix("pin:").ifBlank { "Pinned folder" }
+    id == "downloads" -> "Downloads"
+    id == "desktop" -> "Desktop"
+    id == "documents" -> "Documents"
+    id == "pictures" -> "Pictures"
+    id == "videos" -> "Videos"
     else -> id.replaceFirstChar { it.uppercase() }
 }

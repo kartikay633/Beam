@@ -1050,9 +1050,10 @@ impl AppState {
     }
 
     /// "Saved 3 files from POCO X4 Pro 5G", when Beam's window isn't open to
-    /// show it: files from a trusted device arrive without any prompt.
-    fn notify_saved(&self, id: &str) {
-        use tauri_plugin_notification::NotificationExt;
+    /// show it: files from a trusted device arrive without any prompt. Its
+    /// buttons open the file (just one) or show it in Explorer; clicking the
+    /// notification itself opens Beam.
+    fn notify_saved(&self, id: &str, first_saved: Option<PathBuf>) {
         let window_open = self
             .app
             .get_webview_window("main")
@@ -1071,14 +1072,7 @@ impl AppState {
             return;
         };
         let (title, body) = saved_message(&view);
-        if let Err(e) = self
-            .app
-            .notification()
-            .builder()
-            .title(title)
-            .body(body)
-            .show()
-        {
+        if let Err(e) = show_saved_toast(&self.app, &title, &body, view.file_count, first_saved) {
             eprintln!("notification: {e}");
         }
     }
@@ -1086,6 +1080,62 @@ impl AppState {
     pub fn download_dir(&self) -> PathBuf {
         self.receive_dir.clone()
     }
+}
+
+/// Shows a Windows notification with "Open" (one file only) and "Show in
+/// folder" buttons for `first_saved`.
+fn show_saved_toast(
+    app: &AppHandle,
+    title: &str,
+    body: &str,
+    file_count: usize,
+    first_saved: Option<PathBuf>,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    use tauri_winrt_notification::Toast;
+    // Windows only attributes notifications to Beam (name and icon) once the
+    // installer has registered its app id; a dev build borrows PowerShell's.
+    let installed = std::env::current_exe()
+        .ok()
+        .and_then(|exe| {
+            exe.parent()
+                .map(|dir| !dir.ends_with("debug") && !dir.ends_with("release"))
+        })
+        .unwrap_or(false);
+    let app_id = if installed {
+        app.config().identifier.clone()
+    } else {
+        Toast::POWERSHELL_APP_ID.to_string()
+    };
+    let mut toast = Toast::new(&app_id).title(title).text1(body);
+    if first_saved.is_some() {
+        if file_count == 1 {
+            toast = toast.add_button("Open", "open");
+        }
+        toast = toast.add_button("Show in folder", "reveal");
+    }
+    let app = app.clone();
+    toast
+        .on_activated(move |action| {
+            let opener = app.opener();
+            match (action.as_deref(), &first_saved) {
+                (Some("open"), Some(path)) => {
+                    let _ = opener.open_path(path.display().to_string(), None::<&str>);
+                }
+                (Some("reveal"), Some(path)) => {
+                    let _ = opener.reveal_item_in_dir(path);
+                }
+                _ => {
+                    let app = app.clone();
+                    let _ = app
+                        .clone()
+                        .run_on_main_thread(move || crate::show_main(&app));
+                }
+            }
+            Ok(())
+        })
+        .show()
+        .map_err(|e| e.to_string())
 }
 
 /// The title and text of a "files saved" notification.
@@ -1225,7 +1275,13 @@ impl ReceiveHandler for DesktopHandler {
         } else {
             self.0.finish_transfer(&id, state, detail, None);
             if state == TransferState::Done {
-                self.0.notify_saved(&id);
+                let first_saved = match result {
+                    Ok(ReceiveOutcome::Completed { files, .. }) => {
+                        files.first().map(|f| f.path.clone())
+                    }
+                    _ => None,
+                };
+                self.0.notify_saved(&id, first_saved);
             }
         }
     }

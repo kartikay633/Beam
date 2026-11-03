@@ -221,3 +221,18 @@ test("folders trusted devices may save to are saved with the settings", async ({
   const saved = await page.evaluate(async () => (await (await import("/src/api.ts")).api.snapshot()).settings.saveFolders);
   expect(saved).toEqual(["downloads", "desktop", "documents", "pictures"]);
 });
+
+test("a pinned folder can be added, saved and removed", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Add a folder…" }).click();
+  const folder = String.raw`C:\Users\you\Projects`;
+  const pinned = page.getByRole("list", { name: "Pinned folders" });
+  await expect(pinned).toContainText(folder);
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
+  const saved = await page.evaluate(async () => (await (await import("/src/api.ts")).api.snapshot()).settings.pinnedFolders);
+  expect(saved).toEqual([folder]);
+  await page.getByRole("button", { name: `Remove ${folder}` }).click();
+  await expect(pinned).toBeHidden();
+});

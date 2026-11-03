@@ -38,6 +38,17 @@ export function SettingsPage({ snapshot }: { snapshot: Snapshot }) {
     } catch (e) { setMessage({ kind: "error", text: String(e) }); }
   };
 
+  const pin = async () => {
+    try {
+      const folder = isTauri
+        ? await open({ directory: true, title: "Which folder can your devices save to?" })
+        : String.raw`C:\Users\you\Projects`;
+      if (typeof folder === "string" && !draft.pinnedFolders.includes(folder)) {
+        set("pinnedFolders", [...draft.pinnedFolders, folder]);
+      }
+    } catch (e) { setMessage({ kind: "error", text: String(e) }); }
+  };
+
   return (
     <div className="page narrow">
       <form
@@ -90,6 +101,29 @@ export function SettingsPage({ snapshot }: { snapshot: Snapshot }) {
                     {folder.label}
                   </label>
                 ))}
+              </div>
+              {draft.pinnedFolders.length > 0 && (
+                <ul className="pinned" aria-label="Pinned folders">
+                  {draft.pinnedFolders.map((folder) => (
+                    <li key={folder}>
+                      <span className="ellipsis" title={folder}>{folder}</span>
+                      <button
+                        type="button"
+                        className="text-button"
+                        disabled={busy}
+                        aria-label={`Remove ${folder}`}
+                        onClick={() => set("pinnedFolders", draft.pinnedFolders.filter((f) => f !== folder))}
+                      >
+                        Remove
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div>
+                <button type="button" className="button" disabled={busy} onClick={pin}>
+                  Add a folder…
+                </button>
               </div>
             </fieldset>
             <label className="field">
