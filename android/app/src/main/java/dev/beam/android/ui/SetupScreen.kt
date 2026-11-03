@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateListOf
@@ -55,6 +56,9 @@ import dev.beam.android.radio.RadioSwitches
 @Composable
 fun SetupScreen(onDone: () -> Unit) {
     val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { onDone() }
+    // A Surface sets the background and the matching text colour (light text
+    // in dark mode); without one, text defaults to black.
+    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
     Column(
         Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 24.dp),
     ) {
@@ -90,6 +94,7 @@ fun SetupScreen(onDone: () -> Unit) {
             },
             modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
         )
+    }
     }
 }
 
