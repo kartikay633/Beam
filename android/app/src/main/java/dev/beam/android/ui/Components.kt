@@ -141,7 +141,7 @@ fun IconTile(icon: ImageVector, size: Dp = 46.dp) {
     Box(
         Modifier.size(size).clip(RoundedCornerShape(12.dp)).background(BeamColors.tile),
         contentAlignment = Alignment.Center,
-    ) { Icon(icon, null, modifier = Modifier.size(22.dp)) }
+    ) { Icon(icon, null, modifier = Modifier.size(size * 0.48f)) }
 }
 
 fun deviceIcon(kind: DeviceKind): ImageVector = when (kind) {

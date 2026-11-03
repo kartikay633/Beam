@@ -16,6 +16,7 @@ import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
@@ -72,7 +73,7 @@ fun TransfersScreen(state: BeamState, vm: BeamViewModel) {
 }
 
 @Composable
-fun SettingsScreen(state: BeamState, vm: BeamViewModel, onPair: () -> Unit) {
+fun SettingsScreen(state: BeamState, vm: BeamViewModel, onTour: () -> Unit, onPair: () -> Unit) {
     val context = LocalContext.current
     var name by remember { mutableStateOf(vm.deviceName) }
     var streams by remember { mutableFloatStateOf(vm.streams.toFloat()) }
@@ -110,9 +111,23 @@ fun SettingsScreen(state: BeamState, vm: BeamViewModel, onPair: () -> Unit) {
             }
         }
 
+        ListCard {
+            Row(
+                Modifier.fillMaxWidth().clickable(onClick = onTour).padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                IconTile(Icons.Filled.Info, size = 40.dp)
+                Column(Modifier.weight(1f)) {
+                    Text("How Beam works", fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                    Text("A one-minute tour: pairing, your devices, other people", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Chevron()
+            }
+        }
         SectionLabel("Trusted devices", action = "Pair", onAction = onPair)
         Text(
-            "Trusted devices can always find this phone. With auto-accept on, their files arrive without asking.",
+            "Your own devices, paired once. They can always find this phone, and with auto-accept on their files arrive without asking. Only pair devices that are yours.",
             fontSize = 13.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 10.dp),

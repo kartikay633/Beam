@@ -85,7 +85,7 @@ fun PairScreen(vm: BeamViewModel, onClose: () -> Unit) {
         Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("On the laptop, open Beam and click the pair icon at the top, then point the camera at the QR code.")
+        Text("On your computer, open Beam and click Your devices. Point this camera at the square code there.")
 
         when (val s = step) {
             PairStep.Scanning -> when {
@@ -111,12 +111,12 @@ fun PairScreen(vm: BeamViewModel, onClose: () -> Unit) {
                 Text("  Connecting to the laptop…")
             }
             is PairStep.Done -> {
-                Text("Paired with ${s.name}. You can now send to each other without being visible to everyone.")
+                Text("Paired with ${s.name}. It's now one of your devices: files between you arrive straight away.")
                 Button(onClick = onClose) { Text("Done") }
             }
             is PairStep.Failed -> {
                 Text("Pairing failed: ${s.reason}", color = MaterialTheme.colorScheme.error)
-                Text("Make sure both devices are on the same Wi-Fi, and that the code is less than 5 minutes old.")
+                Text("Keep the phone near the computer with Bluetooth on, and scan a fresh code (each one lasts 5 minutes).")
                 Button(onClick = { step = PairStep.Scanning }) { Text("Try again") }
             }
         }

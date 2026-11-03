@@ -18,6 +18,7 @@ object Notifications {
     const val CHANNEL_STATUS = "status"
     const val CHANNEL_OFFERS = "offers"
     const val CHANNEL_DONE = "done"
+    const val CHANNEL_SWITCHES = "switches"
     const val ID_STATUS = 1
 
     fun createChannels(context: Context) {
@@ -31,6 +32,9 @@ object Notifications {
                     description = "Someone wants to send you files"
                 },
                 NotificationChannel(CHANNEL_DONE, "Finished transfers", NotificationManager.IMPORTANCE_DEFAULT),
+                NotificationChannel(CHANNEL_SWITCHES, "Turn off reminders", NotificationManager.IMPORTANCE_HIGH).apply {
+                    description = "After you leave Beam: switch off the Bluetooth or Location it turned on"
+                },
             ),
         )
     }
@@ -142,10 +146,11 @@ object Notifications {
         if (!manager.areNotificationsEnabled()) return
         val names = switches.map { it.label }
         val list = if (names.size == 1) names[0] else names.dropLast(1).joinToString(", ") + " and " + names.last()
-        val builder = NotificationCompat.Builder(context, CHANNEL_DONE)
+        val builder = NotificationCompat.Builder(context, CHANNEL_SWITCHES)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("Beam turned on $list")
-            .setContentText("Turn ${if (names.size == 1) "it" else "them"} off if you don't need ${if (names.size == 1) "it" else "them"}.")
+            .setContentText("Done sending? Tap a button below, then switch ${if (names.size == 1) "it" else "each one"} off.")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
         switches.forEachIndexed { i, switch ->
             val action = when (switch) {

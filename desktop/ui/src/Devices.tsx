@@ -9,7 +9,11 @@ export function DevicesPage({ snapshot }: { snapshot: Snapshot }) {
   return (
     <div className="page">
       <header className="page-header"><h1>Your devices</h1></header>
-      <p className="secondary">Paired devices can find this PC in “Your devices” visibility mode.</p>
+      <p className="secondary">
+        Pair your own phone once: open Beam on the phone, tap the scan button at the top and point it at the code
+        below. After that its files arrive here straight away, into the folder it picks. Only pair phones that are
+        yours. Anyone else can still send to this PC, but Beam asks you first.
+      </p>
       {snapshot.visibility.mode !== "everyone" && <div className="notice">
         <span>To connect a new phone, let it discover this PC nearby.</span>
         <button className="button" disabled={action.busy} onClick={() => action.run(() => api.setVisibility("everyone"))}>Visible for 10 minutes</button>
