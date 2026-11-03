@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Beam Share promo</title>
+<style>
+  :root { --bg: #0c0e11; --panel: #15181d; --line: #262a31; --text: #f2f3f5; --text-2: #a3a9b3; --ok: #5cc28c; }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { width: 1920px; height: 1080px; overflow: hidden; background: var(--bg); }
+  body { font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif; color: var(--text); -webkit-font-smoothing: antialiased; }
+  .scene { position: absolute; inset: 0; opacity: 0; will-change: opacity, transform; }
+  .center { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+  .grid { position: absolute; inset: 0; background-image:
+      linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px);
+    background-size: 96px 96px; opacity: .22; }
+  h1 { font-size: 112px; font-weight: 650; letter-spacing: -3px; }
+  h2 { font-size: 64px; font-weight: 650; letter-spacing: -1.5px; line-height: 1.1; }
+  .sub { font-size: 30px; color: var(--text-2); margin-top: 18px; line-height: 1.4; }
+  .caption { position: absolute; left: 140px; top: 120px; width: 620px; }
+  .logo { width: 150px; height: 150px; border-radius: 36px; }
+  .window { position: absolute; border-radius: 14px; overflow: hidden; border: 1px solid #2c3038;
+    box-shadow: 0 40px 120px rgba(0,0,0,.55), 0 8px 24px rgba(0,0,0,.4); background: #111317; }
+  .window .bar { height: 34px; background: #1b1e24; display: flex; align-items: center; padding-left: 14px; gap: 8px;
+    font: 500 14px "Segoe UI", sans-serif; color: #c9cdd4; }
+  .window .bar img { width: 16px; height: 16px; border-radius: 4px; }
+  .window > img.shot { display: block; width: 100%; }
+  .phone { position: absolute; width: 400px; height: 840px; border-radius: 56px; background: #050608;
+    border: 3px solid #2a2e35; box-shadow: 0 40px 120px rgba(0,0,0,.6); padding: 14px; }
+  .phone .screen { width: 100%; height: 100%; border-radius: 44px; overflow: hidden; background: #111317; position: relative; }
+  .phone .status { height: 46px; display: flex; align-items: center; justify-content: space-between; padding: 0 30px;
+    font: 600 17px "Segoe UI", sans-serif; color: #e6e8eb; }
+  .phone .screen img { width: 100%; display: block; }
+  .chip { position: absolute; display: flex; align-items: center; gap: 14px; padding: 16px 22px; border-radius: 18px;
+    background: #f2f3f5; color: #14171c; font: 600 22px "Segoe UI", sans-serif; box-shadow: 0 20px 50px rgba(0,0,0,.5); }
+  .chip .icon { width: 40px; height: 40px; border-radius: 10px; background: #14171c; display: grid; place-items: center; }
+  .pill { display: inline-flex; align-items: center; gap: 12px; padding: 12px 22px; border-radius: 999px;
+    border: 1px solid #343943; color: var(--text); font-size: 24px; margin: 8px; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--ok); }
+  .node { position: absolute; width: 210px; height: 210px; border-radius: 48px; background: var(--panel);
+    border: 1px solid #2c3038; display: grid; place-items: center; }
+  .node svg { width: 96px; height: 96px; }
+  .node .label { position: absolute; bottom: -54px; width: 100%; text-align: center; font-size: 26px; color: var(--text-2); }
+  .link { position: absolute; height: 0; border-top: 4px solid var(--text); transform-origin: left center; }
+  .link.dashed { border-top: 4px dashed #7a818c; }
+  .link-label { position: absolute; font-size: 26px; color: var(--text-2); width: 600px; text-align: center; }
+  .highlight { position: absolute; border: 3px solid var(--ok); border-radius: 12px; box-shadow: 0 0 0 8px rgba(92,194,140,.22), 0 0 40px rgba(92,194,140,.35); }
+  .store { margin-top: 44px; display: inline-flex; align-items: center; gap: 16px; padding: 18px 34px; border-radius: 14px;
+    background: #f2f3f5; color: #14171c; font: 600 30px "Segoe UI", sans-serif; }
+  .fine { margin-top: 26px; font-size: 24px; color: #7a818c; }
+</style>
+</head>
+<body>
+<div class="grid"></div>
+
+<!-- 1. Title -->
+<section class="scene center" id="s1">
+  <img class="logo" id="s1logo" src="assets/logo.png" alt="">
+  <h1 id="s1title" style="margin-top:44px">Beam Share</h1>
+  <p class="sub" id="s1sub">Phone to PC. No cable. No internet.</p>
+</section>
+
+<!-- 2. Send -->
+<section class="scene" id="s2">
+  <div class="caption"><h2 id="s2h">Tap a device. It's sent.</h2>
+    <p class="sub" id="s2s">Photos, videos, documents, at full Wi-Fi speed.</p></div>
+  <div class="phone" id="s2phone" style="left:150px; top:200px; transform-origin:center">
+    <div class="screen"><div class="status"><span>9:41</span><span>5G ▮▮▮</span></div><img src="assets/phone-home.png" alt=""></div>
+  </div>
+  <div class="window" id="s2pc" style="left:700px; top:250px; width:1100px">
+    <div class="bar"><img src="assets/logo.png" alt="">Beam</div><img class="shot" src="assets/share-dark.png" alt="">
+  </div>
+  <div class="chip" id="s2chip"><span class="icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></svg></span>Trip photos · 412 MB</div>
+</section>
+
+<!-- 3. No network needed -->
+<section class="scene center" id="s3">
+  <h2 id="s3h">No internet. No shared Wi-Fi.</h2>
+  <p class="sub" id="s3s">Bluetooth finds your PC. A private Wi-Fi link carries the files.</p>
+  <div style="position:relative; width:1200px; height:420px; margin-top:60px">
+    <div class="node" id="s3a" style="left:60px; top:60px"><svg viewBox="0 0 24 24" fill="none" stroke="#f2f3f5" stroke-width="1.6"><rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M11 18h2"/></svg><span class="label">Your phone</span></div>
+    <div class="node" id="s3b" style="left:930px; top:60px"><svg viewBox="0 0 24 24" fill="none" stroke="#f2f3f5" stroke-width="1.6"><rect x="4" y="4" width="16" height="11" rx="2"/><path d="M2 19h20"/></svg><span class="label">Your PC</span></div>
+    <div class="link dashed" id="s3l1" style="left:300px; top:120px; width:600px"></div>
+    <div class="link-label" id="s3t1" style="left:300px; top:70px">Bluetooth: finds and connects</div>
+    <div class="link" id="s3l2" style="left:300px; top:210px; width:600px"></div>
+    <div class="link-label" id="s3t2" style="left:300px; top:228px">Wi-Fi Direct: carries the files, encrypted</div>
+  </div>
+  <div id="s3p"><span class="pill"><span class="dot"></span>Your phone keeps its mobile data</span><span class="pill"><span class="dot"></span>Resumes if the link drops</span></div>
+</section>
+
+<!-- 4. Choose the folder -->
+<section class="scene" id="s4">
+  <div class="caption" style="top:140px"><h2 id="s4h">You choose where<br>files land.</h2>
+    <p class="sub" id="s4s">Desktop, Documents, a new folder, or any folder you pin.</p></div>
+  <div class="window" id="s4pc" style="left:820px; top:150px; width:980px">
+    <div class="bar"><img src="assets/logo.png" alt="">Beam · Settings</div><img class="shot" src="assets/settings-light.png" alt="">
+  </div>
+  <div class="highlight" id="s4hl"></div>
+</section>
+
+<!-- 5. Strangers need your OK -->
+<section class="scene" id="s5">
+  <div class="caption" style="top:330px"><h2 id="s5h">Strangers need<br>your OK.</h2>
+    <p class="sub" id="s5s">Check the same 6-digit code on both screens. Your own devices skip the question.</p></div>
+  <div class="window" id="s5w" style="left:1060px; top:150px; width:620px">
+    <div class="bar"><img src="assets/logo.png" alt="">Incoming files</div><img class="shot" src="assets/offer-light.png" alt="">
+  </div>
+</section>
+
+<!-- 6. Pair once -->
+<section class="scene" id="s6">
+  <div class="caption" style="top:140px"><h2 id="s6h">Pair your phone<br>once.</h2>
+    <p class="sub" id="s6s">Scan the code, and from then on your files arrive straight away.</p></div>
+  <div class="window" id="s6pc" style="left:820px; top:150px; width:980px">
+    <div class="bar"><img src="assets/logo.png" alt="">Beam · Your devices</div><img class="shot" src="assets/devices-light.png" alt="">
+  </div>
+</section>
+
+<!-- 7. End card -->
+<section class="scene center" id="s7">
+  <img class="logo" id="s7logo" src="assets/logo.png" alt="">
+  <h1 style="margin-top:40px; font-size:96px">Beam Share</h1>
+  <p class="sub">Ready in the background, even after you quit.</p>
+  <span class="store">Free on the Microsoft Store</span>
+  <p class="fine">Windows 10 and 11 · Beam for Android</p>
+</section>
+
+<script>
+  // Deterministic: render(t) draws the frame at t seconds, so frames can be
+  // captured one by one (smooth 30 fps, independent of capture speed).
+  const $ = (id) => document.getElementById(id);
+  const clamp = (x) => Math.max(0, Math.min(1, x));
+  const ease = (x) => 1 - Math.pow(1 - clamp(x), 3);           // ease-out cubic
+  const inOut = (x) => { x = clamp(x); return x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; };
+  const p = (t, a, b) => clamp((t - a) / (b - a));
+  // Scene visibility with fades in and out.
+  const scenes = [["s1", 0, 3.6], ["s2", 3.6, 10.6], ["s3", 10.6, 16.4], ["s4", 16.4, 21.6], ["s5", 21.6, 26.2], ["s6", 26.2, 30.6], ["s7", 30.6, 35]];
+  const FADE = 0.45;
+  function show(el, t, a, b, dy = 30) {
+    const k = ease(p(t, a, a + 0.8));
+    el.style.opacity = k;
+    el.style.transform = `translateY(${(1 - k) * dy}px)`;
+  }
+  window.DURATION = 35;
+  window.render = function (t) {
+    for (const [id, a, b] of scenes) {
+      const fadeIn = a === 0 ? 1 : clamp((t - a) / FADE);
+      const fadeOut = b === 35 ? 1 : clamp((b - t) / FADE);
+      $(id).style.opacity = Math.min(fadeIn, fadeOut);
+      $(id).style.display = t >= a - 0.01 && t <= b + 0.01 ? "" : "none";
+    }
+    // 1. Title
+    const l = ease(p(t, 0.1, 1.2));
+    $("s1logo").style.transform = `scale(${0.7 + 0.3 * l})`; $("s1logo").style.opacity = l;
+    show($("s1title"), t, 0.6, 0, 40); show($("s1sub"), t, 1.2, 0, 30);
+    // 2. Send: phone and PC slide in, a file travels across.
+    show($("s2h"), t, 3.8); show($("s2s"), t, 4.2);
+    const ph = ease(p(t, 3.7, 4.7)), pc = ease(p(t, 3.9, 5.0));
+    $("s2phone").style.transform = `translateX(${(1 - ph) * -120}px) rotate(${(1 - ph) * -4}deg)`; $("s2phone").style.opacity = ph;
+    $("s2phone").style.left = "170px"; $("s2phone").style.top = "200px";
+    $("s2phone").style.transform += " scale(0.92)"; $("s2phone").style.transformOrigin = "top left";
+    $("s2pc").style.transform = `translateX(${(1 - pc) * 160}px)`; $("s2pc").style.opacity = pc;
+    $("s2pc").style.left = "720px"; $("s2pc").style.top = "260px"; $("s2pc").style.width = "1060px";
+    const fly = inOut(p(t, 6.2, 8.2));
+    const x = 330 + fly * 820, y = 520 - Math.sin(fly * Math.PI) * 240;
+    $("s2chip").style.left = x + "px"; $("s2chip").style.top = y + "px";
+    $("s2chip").style.opacity = clamp(p(t, 5.8, 6.2)) * (1 - clamp(p(t, 8.2, 8.6)));
+    $("s2chip").style.transform = `scale(${1 - 0.15 * fly})`;
+    // Caption moves above the devices.
+    document.querySelector("#s2 .caption").style.cssText = "left:170px; top:70px; width:1600px";
+    // 3. Network diagram
+    show($("s3h"), t, 10.8); show($("s3s"), t, 11.2);
+    show($("s3a"), t, 11.4, 0, 20); show($("s3b"), t, 11.6, 0, 20);
+    $("s3l1").style.transform = `scaleX(${ease(p(t, 12.0, 12.9))})`; $("s3t1").style.opacity = ease(p(t, 12.5, 13.1));
+    $("s3l2").style.transform = `scaleX(${ease(p(t, 13.0, 13.9))})`; $("s3t2").style.opacity = ease(p(t, 13.5, 14.1));
+    show($("s3p"), t, 14.3, 0, 20);
+    // 4. Folder settings, then a highlight on the save-to choices.
+    show($("s4h"), t, 16.6); show($("s4s"), t, 17.0);
+    const w4 = ease(p(t, 16.5, 17.5));
+    $("s4pc").style.transform = `translateY(${(1 - w4) * 60}px) scale(${0.96 + 0.04 * w4})`; $("s4pc").style.opacity = w4;
+    // Settings capture is 2560x1600 shown 980 wide: scale 0.3828; plus the 34px bar.
+    const sx = 820, sy = 150 + 34, s = 980 / 2560;
+    const hl = ease(p(t, 18.4, 19.2));
+    Object.assign($("s4hl").style, { left: sx + 500 * s + "px", top: sy + 605 * s + "px", width: 1960 * s + "px", height: 270 * s + "px", opacity: hl });
+    // 5. Incoming files prompt
+    show($("s5h"), t, 21.8); show($("s5s"), t, 22.2);
+    const w5 = ease(p(t, 21.9, 22.9));
+    $("s5w").style.transform = `translateY(${(1 - w5) * 80}px)`; $("s5w").style.opacity = w5;
+    $("s5w").style.left = "1040px"; $("s5w").style.top = "180px"; $("s5w").style.width = "640px";
+    // 6. Pairing
+    show($("s6h"), t, 26.4); show($("s6s"), t, 26.8);
+    const w6 = ease(p(t, 26.5, 27.5));
+    $("s6pc").style.transform = `translateY(${(1 - w6) * 60}px) scale(${0.96 + 0.04 * w6})`; $("s6pc").style.opacity = w6;
+    // 7. End card
+    const e = ease(p(t, 30.7, 31.7));
+    $("s7logo").style.transform = `scale(${0.8 + 0.2 * e})`;
+  };
+  window.render(0);
+</script>
+</body>
+</html>

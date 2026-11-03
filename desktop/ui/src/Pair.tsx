@@ -43,10 +43,10 @@ export function PairPage() {
             <h1>Pair a phone</h1>
             <ol>
               <li>Open Beam on your phone.</li>
-              <li>Open Settings → Pair with a laptop, then scan this code.</li>
+              <li>Tap <strong>Scan code</strong> at the top and point the camera at this code.</li>
               <li>Check the phone shows <span className="mono">{info.deviceId}</span>.</li>
             </ol>
-            <p className="secondary">Paired devices recognize each other while nearby and Beam is running. Keep Wi-Fi and Bluetooth on for sharing without a router.</p>
+            <p className="secondary">You only do this once. After that, your phone's files arrive here straight away. Keep Wi-Fi and Bluetooth on; they don't need to be connected to anything.</p>
             <div className="pair-actions">
               <button className="text-button" onClick={() => setAttempt((n) => n + 1)}>New code</button>
               <button className="text-button" onClick={async () => {
@@ -56,7 +56,7 @@ export function PairPage() {
                 } catch (e) { setError(String(e)); }
               }}>{copied ? "Copied" : "Copy pairing link"}</button>
             </div>
-            <p className="caption">Works once, for {Math.round(info.validForSecs / 60)} minutes · {info.addresses.length ? info.addresses.join(", ") : "Connect a private Wi-Fi link to pair"}</p>
+            <p className="caption">Works once, for {Math.round(info.validForSecs / 60)} minutes · {info.addresses.length ? info.addresses.join(", ") : "Pairs over Bluetooth, no shared Wi-Fi needed"}</p>
           </div>
         </div>
       )}
