@@ -965,6 +965,18 @@ section > .text-button.subtle {
 .save-folders .pinned li { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--divider); }
 .save-folders .pinned .ellipsis { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .save-folders > div:last-child { margin-top: 10px; }
+.empty-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; }
+.scrim { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 24px; background: rgba(10, 12, 15, 0.45); }
+.phone-app { width: min(640px, 100%); max-height: calc(100vh - 48px); overflow: auto; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow); }
+.phone-app header { display: flex; align-items: center; justify-content: space-between; padding: 16px 16px 0 22px; }
+.phone-app h2 { font-size: 18px; font-weight: 600; margin: 0; }
+.phone-app-body { display: flex; gap: 22px; padding: 18px 22px 22px; align-items: flex-start; }
+.phone-app ol { margin: 0 0 12px; padding-left: 18px; display: grid; gap: 6px; }
+.phone-app .link-line { margin: 2px 0 10px; font-size: 12px; word-break: break-all; color: var(--text-2); }
+.phone-app-actions { display: flex; gap: 8px; }
+.phone-app .soon { display: flex; align-items: center; gap: 8px; margin: 16px 0 4px; font-weight: 500; }
+.soon-badge { padding: 3px 10px; border-radius: 999px; border: 1px solid var(--control-border); font-size: 12px; font-weight: 600; }
+.qr.placeholder { background: var(--tile); }
 .ready-prompt { display: flex; align-items: center; gap: 16px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); }
 .ready-prompt p { margin: 2px 0 0; }
 .ready-actions { display: flex; gap: 8px; flex: none; }
@@ -1009,6 +1021,7 @@ section > .text-button.subtle {
   .layer { height: calc(100vh - 59px); }
   .device-action { padding: 5px 10px; }
   .ready-prompt { flex-direction: column; align-items: stretch; }
+  .phone-app-body { flex-direction: column; align-items: center; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }

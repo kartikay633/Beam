@@ -145,6 +145,7 @@ export const api = {
   removeTrusted: (deviceId: string) => invoke<void>("remove_trusted", { deviceId }),
   updateSettings: (settings: Settings) => invoke<void>("update_settings", { settings }),
   pairing: () => invoke<PairingInfo>("pairing_info"),
+  phoneApp: () => invoke<{ url: string; svg: string }>("phone_app"),
   openFolder: (path?: string) => invoke<void>("open_folder", { path: path ?? null }),
 };
 
@@ -246,6 +247,11 @@ async function demoInvoke<T>(command: string, args: Record<string, unknown>): Pr
         s.transfers = s.transfers.filter((t) => !["done", "declined", "failed", "cancelled"].includes(t.state));
       });
       break;
+    case "phone_app":
+      return {
+        url: "https://github.com/kartikay633/Beam/releases/download/android/BeamShare.apk",
+        svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 21 21"><rect width="21" height="21" fill="#fff"/><path d="M1 1h7v7H1zM13 1h7v7h-7zM1 13h7v7H1z" fill="#000"/><path d="M3 3h3v3H3zM15 3h3v3h-3zM3 15h3v3H3z" fill="#fff"/></svg>',
+      } as T;
     case "pairing_info":
       return {
         uri: "beam://pair?v=1&id=80b4eac682edd3d3&key=…",

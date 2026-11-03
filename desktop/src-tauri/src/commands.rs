@@ -8,7 +8,7 @@ use beam_core::VisibilityMode;
 use tauri::State;
 use tauri_plugin_opener::OpenerExt;
 
-use crate::pairing::{pairing_info as build_pairing_info, PairingInfo};
+use crate::pairing::{pairing_info as build_pairing_info, PairingInfo, PhoneApp};
 use crate::settings::Settings;
 use crate::state::{AppState, OfferView, Snapshot};
 
@@ -109,4 +109,10 @@ pub fn open_folder(state: AppStateRef<'_>, path: Option<String>) -> Result<(), S
         .opener()
         .open_path(folder.display().to_string(), None::<&str>)
         .map_err(|e| e.to_string())
+}
+
+/// The download link for Beam on Android, with its QR code.
+#[tauri::command]
+pub fn phone_app() -> PhoneApp {
+    crate::pairing::phone_app()
 }

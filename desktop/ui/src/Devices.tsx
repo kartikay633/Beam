@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api, type Snapshot } from "./api";
 import { PairPage } from "./Pair";
+import { GetPhoneAppButton } from "./PhoneApp";
 import { DeviceIcon } from "./icons";
 import { useAction } from "./useAction";
 
@@ -8,7 +9,7 @@ export function DevicesPage({ snapshot }: { snapshot: Snapshot }) {
   const action = useAction();
   return (
     <div className="page">
-      <header className="page-header"><h1>Your devices</h1></header>
+      <header className="page-header"><h1>Your devices</h1><GetPhoneAppButton /></header>
       <p className="secondary">
         Pair your own phone once: open Beam on the phone, tap the scan button at the top and point it at the code
         below. After that its files arrive here straight away, into the folder it picks. Only pair phones that are

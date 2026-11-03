@@ -5,6 +5,7 @@ import { api, isTauri, type Device, type Snapshot, type Transfer } from "./api";
 import type { Page } from "./App";
 import { useCountdown } from "./App";
 import { TransferList } from "./Transfers";
+import { GetPhoneAppButton } from "./PhoneApp";
 import { useAction } from "./useAction";
 import { formatBytes, formatMinutesLeft } from "./format";
 import {
@@ -195,9 +196,12 @@ function DeviceList({
             <p className="secondary">
               Open Beam on your phone with Bluetooth and Wi-Fi on. No shared Wi-Fi needed.
             </p>
-            <button className="hyperlink" onClick={onPair}>
-              Pair a phone
-            </button>
+            <div className="empty-actions">
+              <GetPhoneAppButton label="Don't have it? Get Beam on your phone" />
+              <button className="hyperlink" onClick={onPair}>
+                Pair a phone
+              </button>
+            </div>
           </div>
         </div>
       ) : (

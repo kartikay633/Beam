@@ -236,3 +236,14 @@ test("a pinned folder can be added, saved and removed", async ({ page }) => {
   await page.getByRole("button", { name: `Remove ${folder}` }).click();
   await expect(pinned).toBeHidden();
 });
+
+test("the phone app download opens with its link and closes with Escape", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Your devices" }).click();
+  await page.getByRole("button", { name: "Get Beam on your phone" }).click();
+  const panel = page.getByRole("dialog", { name: "Get Beam on your phone" });
+  await expect(panel).toContainText("releases/download/android/BeamShare.apk");
+  await expect(panel).toContainText("Coming soon");
+  await page.keyboard.press("Escape");
+  await expect(panel).toBeHidden();
+});

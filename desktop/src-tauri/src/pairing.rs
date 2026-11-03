@@ -22,6 +22,37 @@ pub struct PairingInfo {
 
 /// Opens a new pairing window (earlier codes stop working) and returns the
 /// code to show.
+/// Where phones download Beam for Android until it's on Google Play: a
+/// release-signed APK on GitHub (the "android" release).
+pub const PHONE_APP_URL: &str =
+    "https://github.com/kartikay633/Beam/releases/download/android/BeamShare.apk";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhoneApp {
+    pub url: String,
+    /// A QR code of `url`, as SVG, for the phone's camera.
+    pub svg: String,
+}
+
+pub fn phone_app() -> PhoneApp {
+    PhoneApp {
+        url: PHONE_APP_URL.to_string(),
+        svg: qr_svg(PHONE_APP_URL),
+    }
+}
+
+fn qr_svg(text: &str) -> String {
+    qrcode::QrCode::new(text.as_bytes())
+        .map(|qr| {
+            qr.render::<qrcode::render::svg::Color>()
+                .min_dimensions(256, 256)
+                .quiet_zone(true)
+                .build()
+        })
+        .unwrap_or_default()
+}
+
 pub fn pairing_info(me: &LocalDevice, port: u16, window: &PairingWindow) -> PairingInfo {
     let code = PairingCode {
         device_id: me.device_id(),
@@ -34,14 +65,7 @@ pub fn pairing_info(me: &LocalDevice, port: u16, window: &PairingWindow) -> Pair
         token: window.open(),
     };
     let uri = code.to_uri();
-    let svg = qrcode::QrCode::new(uri.as_bytes())
-        .map(|qr| {
-            qr.render::<qrcode::render::svg::Color>()
-                .min_dimensions(256, 256)
-                .quiet_zone(true)
-                .build()
-        })
-        .unwrap_or_default();
+    let svg = qr_svg(&uri);
     PairingInfo {
         uri,
         svg,

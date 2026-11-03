@@ -89,6 +89,7 @@ fn main() {
             commands::remove_trusted,
             commands::update_settings,
             commands::pairing_info,
+            commands::phone_app,
             commands::open_folder,
         ])
         .build(tauri::generate_context!())
