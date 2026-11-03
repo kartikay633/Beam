@@ -53,10 +53,10 @@ New-Item -ItemType Directory -Force (Join-Path $layout "Assets") | Out-Null
 
 Copy-Item $exe (Join-Path $layout "Beam.exe")
 Copy-Item $wakeTask (Join-Path $layout "beam_wake_task.dll")
-$icons = Join-Path $desktop "src-tauri/icons"
-foreach ($name in "StoreLogo.png", "Square44x44Logo.png", "Square150x150Logo.png") {
-    Copy-Item (Join-Path $icons $name) (Join-Path $layout "Assets/$name")
-}
+# Every size and form of the icons (msix/Assets). The "unplated" ones let
+# the taskbar and Start show the icon on its own; without them Windows puts
+# it on a plate in the accent colour, which shows at the rounded corners.
+Copy-Item (Join-Path $here "Assets/*") (Join-Path $layout "Assets")
 
 $manifest = (Get-Content (Join-Path $here "AppxManifest.xml") -Raw).
     Replace("{{IDENTITY_NAME}}", $IdentityName).
@@ -64,6 +64,20 @@ $manifest = (Get-Content (Join-Path $here "AppxManifest.xml") -Raw).
     Replace("{{PUBLISHER_DISPLAY_NAME}}", $PublisherDisplayName).
     Replace("{{VERSION}}", $Version)
 Set-Content -Path (Join-Path $layout "AppxManifest.xml") -Value $manifest -Encoding utf8
+
+# resources.pri indexes those variants; without it Windows only sees the
+# exact file names in the manifest.
+$makepri = Join-Path $sdk.DirectoryName "makepri.exe"
+$priConfig = Join-Path $out "priconfig.xml"
+& $makepri createconfig /cf $priConfig /dq en-US /pv 10.0.0 /o | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "makepri createconfig failed ($LASTEXITCODE)" }
+# One resources.pri for one package: no per-scale split (that's for bundles).
+$config = [xml](Get-Content $priConfig -Raw)
+$config.SelectNodes("//packaging") | ForEach-Object { $_.ParentNode.RemoveChild($_) | Out-Null }
+$config.Save($priConfig)
+Remove-Item (Join-Path $layout "resources*.pri") -ErrorAction SilentlyContinue
+& $makepri new /pr $layout /cf $priConfig /mn (Join-Path $layout "AppxManifest.xml") /of (Join-Path $layout "resources.pri") /o | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "makepri new failed ($LASTEXITCODE)" }
 
 # -Register installs the layout folder directly (Developer Mode, no signing),
 # for testing on this PC.
